@@ -1,0 +1,16 @@
+{
+  "vectors": 200000,
+  "dims": 768,
+  "cores": 20,
+  "upsert_total_ms": 1529,
+  "search_top100_median_ms": 12.21,
+  "search_top100_max_ms": 45.34,
+  "search_top100_filtered_half_median_ms": 4.09,
+  "search_top10_median_ms": 6.34,
+  "managed_heap_delta_mb": 166.4,
+  "working_set_delta_mb": 163,
+  "index_bytes_mb": 157.3,
+  "file_bytes_mb": 156,
+  "save_ms": 44,
+  "load_ms": 51
+}

@@ -150,7 +150,8 @@ public sealed class ModelStore : IDisposable
             return;
         }
 
-        using var request = new HttpRequestMessage(HttpMethod.Get, file.Url);
+        Uri url = await ResolveAsync(file, ct).ConfigureAwait(false);
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
         AddAuth(request);
         if (have > 0) request.Headers.Range = new RangeHeaderValue(have, null);
 
@@ -203,6 +204,48 @@ public sealed class ModelStore : IDisposable
         progress?.Report(new ModelDownloadProgress(file.Name, received, total));
         if (received != file.Bytes)
             throw new InvalidDataException($"{file.Name}: received {received} bytes, manifest says {file.Bytes}.");
+    }
+
+    /// <summary>
+    /// The URL to fetch. With no token this is the manifest URL as it is.
+    /// With <see cref="TokenEnvVar"/> set and a GitHub release download
+    /// URL, the asset is looked up through the API, because a private
+    /// repository answers 404 on the plain download URL even to its owner.
+    /// </summary>
+    private async Task<Uri> ResolveAsync(ModelFile file, CancellationToken ct)
+    {
+        var url = new Uri(file.Url);
+        string? token = Environment.GetEnvironmentVariable(TokenEnvVar);
+        if (string.IsNullOrWhiteSpace(token) || !url.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
+            return url;
+        // /{owner}/{repo}/releases/download/{tag}/{name}
+        string[] parts = url.AbsolutePath.Trim('/').Split('/');
+        if (parts.Length != 6 || parts[2] != "releases" || parts[3] != "download") return url;
+        string owner = parts[0], repo = parts[1], tag = parts[4], name = Uri.UnescapeDataString(parts[5]);
+
+        using var request = new HttpRequestMessage(HttpMethod.Get,
+            new Uri($"https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}"));
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+        using HttpResponseMessage response = await _http.SendAsync(request, ct).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            _log.LogWarning("{File}: release lookup answered {Status}; using the plain URL", file.Name, (int)response.StatusCode);
+            return url;
+        }
+        using var doc = await System.Text.Json.JsonDocument.ParseAsync(
+            await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false), default, ct).ConfigureAwait(false);
+        if (doc.RootElement.TryGetProperty("assets", out var assets))
+        {
+            foreach (var asset in assets.EnumerateArray())
+            {
+                if (asset.TryGetProperty("name", out var n) && n.GetString() == name
+                    && asset.TryGetProperty("url", out var u) && u.GetString() is string apiUrl)
+                    return new Uri(apiUrl);
+            }
+        }
+        _log.LogWarning("{File}: not among the release assets; using the plain URL", file.Name);
+        return url;
     }
 
     private static void AddAuth(HttpRequestMessage request)

@@ -41,6 +41,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Tessera.Desktop.Search.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Tessera.Desktop.Search.Abstractions\Tessera.Desktop.Search.Abstractions.csproj" />
   </ItemGroup>
 

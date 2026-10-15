@@ -303,7 +303,8 @@ public sealed class BruteForceVectorIndex : IVectorIndex, IDisposable
     /// </summary>
     internal static float Quantize(ReadOnlySpan<float> v, Span<sbyte> q)
     {
-        float maxAbs = TensorPrimitives.MaxMagnitude(v);
+        // MaxMagnitude returns the signed element; the scale wants its magnitude.
+        float maxAbs = MathF.Abs(TensorPrimitives.MaxMagnitude(v));
         if (maxAbs <= 0 || float.IsNaN(maxAbs))
         {
             q.Clear();

@@ -1,0 +1,14 @@
+{
+  "cpu_threads": 20,
+  "cpu_images_per_s_batch1": 6.61,
+  "cpu_images_per_s_batch8": 12.66,
+  "cpu_preprocess_ms_1600x1200": 2.73,
+  "cpu_text_ms": 33.15,
+  "cpu_device": "Cpu",
+  "gpu_images_per_s_batch1": 1.74,
+  "gpu_images_per_s_batch8": 19.31,
+  "gpu_preprocess_ms_1600x1200": 2.94,
+  "gpu_text_ms": 27.46,
+  "gpu_device": "DirectML (Intel(R) Graphics)",
+  "model_download_mb": 755.2
+}
