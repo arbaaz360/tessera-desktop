@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Tessera Desktop - shell dev page</title>
+  <style>
+    body { font: 14px/1.5 system-ui, sans-serif; background: #1c1a22; color: #eee; margin: 0; padding: 24px; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    p.sub { color: #999; margin: 0 0 20px; }
+    section { margin: 0 0 16px; padding: 12px 16px; background: #26232e; border-radius: 8px; }
+    section h2 { font-size: 14px; margin: 0 0 8px; color: #f5d46e; }
+    button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 0; background: #e85d3c; color: #fff; cursor: pointer; margin: 0 6px 6px 0; }
+    button.alt { background: #3c78be; }
+    input { font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid #555; background: #1c1a22; color: #eee; width: 360px; }
+    pre { background: #141218; padding: 10px; border-radius: 6px; overflow: auto; margin: 8px 0 0; min-height: 20px; white-space: pre-wrap; word-break: break-all; }
+    .ok { color: #54aa96; } .err { color: #e85d3c; }
+  </style>
+</head>
+<body>
+  <h1>Tessera Desktop: shell dev page</h1>
+  <p class="sub">Calls every command from docs/CONTRACT.md section 5 and prints the answer. Built with <code>tauri.stub.conf.json</code>.</p>
+
+  <section>
+    <h2>core_info()</h2>
+    <button id="b-core">core_info</button>
+    <button id="b-health" class="alt">GET /health/ready (no token)</button>
+    <button id="b-lic-core" class="alt">GET /api/licence (bearer)</button>
+    <button id="b-lic-bad" class="alt">GET /api/licence (wrong token, expect 401)</button>
+    <button id="b-lic-key" class="alt">GET /api/licence?sessionKey=</button>
+    <pre id="o-core"></pre>
+  </section>
+
+  <section>
+    <h2>app_version()</h2>
+    <button id="b-ver">app_version</button>
+    <pre id="o-ver"></pre>
+  </section>
+
+  <section>
+    <h2>pick_folder()</h2>
+    <button id="b-pick">pick_folder</button>
+    <pre id="o-pick"></pre>
+  </section>
+
+  <section>
+    <h2>open_external(url)</h2>
+    <button id="b-open">open_external("https://tauri.app")</button>
+    <button id="b-open-bad" class="alt">open_external("file:///etc") (expect error)</button>
+    <pre id="o-open"></pre>
+  </section>
+
+  <section>
+    <h2>licence_get() / licence_activate(key)</h2>
+    <button id="b-lget">licence_get</button><br>
+    <input id="key" placeholder="licence key" value="TEST-KEY-0000-1234">
+    <button id="b-lact">licence_activate</button>
+    <pre id="o-lic"></pre>
+  </section>
+
+  <section>
+    <h2>shell-internal</h2>
+    <button id="b-restart" class="alt">core_restart</button>
+    <button id="b-logs" class="alt">open_logs</button>
+    <pre id="o-int"></pre>
+  </section>
+
+  <section>
+    <h2>events</h2>
+    <pre id="o-ev"></pre>
+  </section>
+
+  <script>
+    const invoke = window.__TAURI__.core.invoke;
+    const listen = window.__TAURI__.event.listen;
+    const $ = (id) => document.getElementById(id);
+    const show = (id, v, cls) => { const el = $(id); el.className = cls || ''; el.textContent = typeof v === 'string' ? v : JSON.stringify(v, null, 2); };
+    const run = (id, fn) => fn().then((v) => show(id, v, 'ok')).catch((e) => show(id, 'error: ' + (e && e.message ? e.message : e), 'err'));
+    let core = null;
+
+    const fetchCore = async (path, headers) => {
+      if (!core) core = await invoke('core_info');
+      const r = await fetch(core.baseUrl + path, { headers: headers || {} });
+      const text = await r.text();
+      return { status: r.status, body: text };
+    };
+
+    $('b-core').onclick = () => run('o-core', async () => { core = await invoke('core_info'); return core; });
+    $('b-health').onclick = () => run('o-core', () => fetchCore('/health/ready'));
+    $('b-lic-core').onclick = () => run('o-core', () => fetchCore('/api/licence', { Authorization: 'Bearer ' + core.token }));
+    $('b-lic-bad').onclick = () => run('o-core', () => fetchCore('/api/licence', { Authorization: 'Bearer nope' }));
+    $('b-lic-key').onclick = () => run('o-core', () => fetchCore('/api/licence?sessionKey=' + encodeURIComponent(core.token)));
+    $('b-ver').onclick = () => run('o-ver', () => invoke('app_version'));
+    $('b-pick').onclick = () => run('o-pick', () => invoke('pick_folder'));
+    $('b-open').onclick = () => run('o-open', () => invoke('open_external', { url: 'https://tauri.app' }).then(() => 'opened'));
+    $('b-open-bad').onclick = () => run('o-open', () => invoke('open_external', { url: 'file:///etc' }).then(() => 'opened?!'));
+    $('b-lget').onclick = () => run('o-lic', () => invoke('licence_get'));
+    $('b-lact').onclick = () => run('o-lic', () => invoke('licence_activate', { key: $('key').value }));
+    $('b-restart').onclick = () => run('o-int', () => invoke('core_restart').then((i) => { core = i; return i; }));
+    $('b-logs').onclick = () => run('o-int', () => invoke('open_logs').then(() => 'opened'));
+
+    const ev = (name) => listen(name, (e) => { $('o-ev').textContent += name + ' ' + JSON.stringify(e.payload) + '\n'; });
+    ev('core-ready'); ev('core-error'); ev('update-available');
+
+    // On load: the three calls the web app makes first, then one request to
+    // the core with the token (the stub logs it, so the shell log proves the
+    // page got a working core_info).
+    run('o-ver', () => invoke('app_version'));
+    run('o-lic', () => invoke('licence_get'));
+    run('o-core', async () => {
+      core = await invoke('core_info');
+      const probe = await fetchCore('/api/licence', { Authorization: 'Bearer ' + core.token });
+      return { coreInfo: core, probe };
+    });
+  </script>
+</body>
+</html>

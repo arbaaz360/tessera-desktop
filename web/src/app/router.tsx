@@ -6,62 +6,70 @@ import {
   redirect,
 } from '@tanstack/react-router';
 import { AppShell } from './AppShell';
+import { queryClient } from './queryClient';
+import { apiJson } from '@/shared/api/tessera';
+import { qk } from '@/shared/api/queries';
+import type { Library } from '@/shared/api/types';
 import { PhotosPage } from '@/features/timeline/PhotosPage';
 import { AlbumsPage } from '@/features/albums/AlbumsPage';
 import { AlbumDetailPage } from '@/features/albums/AlbumDetailPage';
 import { SearchPage } from '@/features/search/SearchPage';
-import { LoginPage } from '@/features/auth/LoginPage';
 import { TrashPage } from '@/features/trash/TrashPage';
 import { AssetPage } from '@/features/viewer/AssetPage';
-import { JobsPage } from '@/features/admin/JobsPage';
-import { AdminPage } from '@/features/admin/AdminPage';
-import { MusicPage } from '@/features/music/MusicPage';
-import { FacesPage } from '@/features/faces/FacesPage';
-import { getMyUser } from '@immich/sdk';
+import { LibraryPage } from '@/features/library/LibraryPage';
+import { SettingsPage } from '@/features/settings/SettingsPage';
+import { OnboardingPage } from '@/features/onboarding/OnboardingPage';
 
 /**
  * Routing.
  *
- * Defined in code rather than generated from the filesystem. Both are valid
- * TanStack Router styles; explicit routes are easier to follow when you can see
- * the whole map in one file, and there is no codegen step to explain.
+ * Defined in code rather than generated from the filesystem: explicit routes
+ * are easier to follow when you can see the whole map in one file, and there
+ * is no codegen step to explain.
  *
- * Auth is enforced in `beforeLoad` on the protected layout route, so an
- * unauthenticated visitor is redirected before any child component mounts —
- * rather than each page checking for itself and flashing content first.
+ * There is no login. The boot token is applied before the router mounts (see
+ * AppBoot). What gates the app instead is ONBOARDING: a library with no roots
+ * has nothing to show, so every page under the shell redirects to /welcome
+ * until a folder has been added. The check reads the library through the
+ * same query cache the Library page fills, so it is one request per session,
+ * not one per navigation.
  */
 
 const rootRoute = createRootRoute({
   component: () => <Outlet />,
 });
 
-const loginRoute = createRoute({
+/** First run: pick a folder, watch the model arrive. Full screen, no shell. */
+const welcomeRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: '/login',
-  component: LoginPage,
+  path: '/welcome',
+  component: OnboardingPage,
 });
 
-/**
- * Everything below this route requires a session.
- *
- * `getMyUser` doubles as the auth check: it succeeds only with a valid session
- * cookie, so one request both authenticates and gives us the current user.
- */
-const authedRoute = createRoute({
+const appRoute = createRoute({
   getParentRoute: () => rootRoute,
-  id: 'authed',
-  beforeLoad: async ({ location }) => {
+  id: 'app',
+  beforeLoad: async () => {
+    let library: Library;
     try {
-      await getMyUser();
+      library = await queryClient.ensureQueryData({
+        queryKey: qk.library.summary(),
+        queryFn: () => apiJson<Library>('/api/library'),
+      });
     } catch {
-      throw redirect({ to: '/login', search: { redirect: location.href } });
+      // The core is unreachable or unhappy; let the page say so rather than
+      // bouncing a person with a library to the welcome screen.
+      return;
+    }
+    if (library.roots.length === 0) {
+      throw redirect({ to: '/welcome' });
     }
   },
   component: AppShell,
 });
 
 const indexRoute = createRoute({
-  getParentRoute: () => authedRoute,
+  getParentRoute: () => appRoute,
   path: '/',
   beforeLoad: () => {
     throw redirect({ to: '/photos' });
@@ -69,85 +77,67 @@ const indexRoute = createRoute({
 });
 
 const photosRoute = createRoute({
-  getParentRoute: () => authedRoute,
+  getParentRoute: () => appRoute,
   path: '/photos',
   component: PhotosPage,
 });
 
-/**
- * Deep link to one asset. External links use this shape — notably the
- * reverse-face-search sidecar, whose result links were built for the old web
- * UI's /photos/{id} URLs — and it makes a single photo shareable by address.
- */
+/** Deep link to one picture. */
 const photoAssetRoute = createRoute({
-  getParentRoute: () => authedRoute,
+  getParentRoute: () => appRoute,
   path: '/photos/$assetId',
   component: AssetPage,
 });
 
 const albumsRoute = createRoute({
-  getParentRoute: () => authedRoute,
+  getParentRoute: () => appRoute,
   path: '/albums',
   component: AlbumsPage,
 });
 
 const albumDetailRoute = createRoute({
-  getParentRoute: () => authedRoute,
+  getParentRoute: () => appRoute,
   path: '/albums/$albumId',
   component: AlbumDetailPage,
 });
 
+/**
+ * Search carries three things in the URL: the words, an album scope, and -
+ * for "more like this" - the picture whose vector is the query. The filter
+ * params ride alongside untyped; see features/search/searchParams.ts.
+ */
 const searchRoute = createRoute({
-  getParentRoute: () => authedRoute,
+  getParentRoute: () => appRoute,
   path: '/search',
   component: SearchPage,
   validateSearch: (search: Record<string, unknown>) => ({
     q: typeof search.q === 'string' ? search.q : '',
     albumId: typeof search.albumId === 'string' ? search.albumId : undefined,
+    similar: typeof search.similar === 'string' ? search.similar : undefined,
   }),
 });
 
 const trashRoute = createRoute({
-  getParentRoute: () => authedRoute,
+  getParentRoute: () => appRoute,
   path: '/trash',
   component: TrashPage,
 });
 
-const musicRoute = createRoute({
-  getParentRoute: () => authedRoute,
-  path: '/music',
-  component: MusicPage,
+const libraryRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: '/library',
+  component: LibraryPage,
 });
 
-/**
- * Jobs and admin are separate routes rather than one page with tabs: jobs is a
- * monitoring surface someone keeps open while a queue drains, admin is a place
- * visited briefly to change a setting. Different rhythms, different pages.
- */
-const facesRoute = createRoute({
-  getParentRoute: () => authedRoute,
-  path: '/faces',
-  component: FacesPage,
-  validateSearch: (search: Record<string, unknown>) => ({
-    assetId: typeof search.assetId === 'string' ? search.assetId : undefined,
-  }),
-});
-
-const jobsRoute = createRoute({
-  getParentRoute: () => authedRoute,
-  path: '/jobs',
-  component: JobsPage,
-});
-
-const adminRoute = createRoute({
-  getParentRoute: () => authedRoute,
-  path: '/admin',
-  component: AdminPage,
+const settingsRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: '/settings',
+  component: SettingsPage,
 });
 
 const routeTree = rootRoute.addChildren([
-  loginRoute,
-  authedRoute.addChildren([
+  welcomeRoute,
+  appRoute.addChildren([
     indexRoute,
     photosRoute,
     photoAssetRoute,
@@ -155,10 +145,8 @@ const routeTree = rootRoute.addChildren([
     albumDetailRoute,
     searchRoute,
     trashRoute,
-    musicRoute,
-    facesRoute,
-    jobsRoute,
-    adminRoute,
+    libraryRoute,
+    settingsRoute,
   ]),
 ]);
 

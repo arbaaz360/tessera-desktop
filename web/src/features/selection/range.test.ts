@@ -17,8 +17,6 @@ const asset = (id: string): TimelineAsset => ({
   durationMs: null,
   fileCreatedAt: '2024-01-01T00:00:00Z',
   livePhotoVideoId: null,
-  city: null,
-  country: null,
 });
 
 const assets = ['a', 'b', 'c', 'd', 'e'].map(asset);

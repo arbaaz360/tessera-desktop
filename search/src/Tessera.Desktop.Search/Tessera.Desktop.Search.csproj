@@ -1,0 +1,58 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- SigLIP2 through ONNX Runtime and a brute-force vector index.
+       Implements the frozen interfaces in Tessera.Desktop.Search.Abstractions. -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Tessera.Desktop.Search</RootNamespace>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- CA1848/CA1873 want LoggerMessage delegates; the few log calls here run once per load or download. -->
+    <NoWarn>$(NoWarn);CA1848;CA1873</NoWarn>
+  </PropertyGroup>
+
+  <!-- On win-x64 the DirectML package replaces the base ONNX Runtime package:
+       it carries the same CPU provider plus DirectML, and the managed API is
+       the same assembly (Microsoft.ML.OnnxRuntime.Managed). Everywhere else
+       the base package is used; it has CoreML built in on macOS. The two
+       packages cannot be referenced together (both ship onnxruntime.dll). -->
+  <PropertyGroup>
+    <_TesseraUseDirectML Condition="'$(RuntimeIdentifier)' == 'win-x64' OR '$(RuntimeIdentifier)' == 'win-arm64' OR ('$(RuntimeIdentifier)' == '' AND $([MSBuild]::IsOSPlatform('Windows')))">true</_TesseraUseDirectML>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(_TesseraUseDirectML)' == 'true'">
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(_TesseraUseDirectML)' != 'true'">
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.24.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ML.Tokenizers" Version="2.0.1" />
+    <PackageReference Include="SkiaSharp" Version="3.119.0" />
+    <PackageReference Include="System.Numerics.Tensors" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Tessera.Desktop.Search.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Tessera.Desktop.Search.Abstractions\Tessera.Desktop.Search.Abstractions.csproj" />
+  </ItemGroup>
+
+  <!-- The manifest travels inside the assembly so the library can never be
+       deployed apart from the hashes it trusts. models/manifest.json is the
+       one the export script wrote and the release carries. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\..\models\manifest.json" LogicalName="Tessera.Desktop.Search.manifest.json" />
+  </ItemGroup>
+
+</Project>

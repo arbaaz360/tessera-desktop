@@ -1,38 +1,34 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
-import { IndexAlbum } from './IndexAlbum';
 import { useAlbum } from '@/shared/api/queries';
+import { apiErrorMessage } from '@/shared/api/tessera';
+import type { AlbumDto } from '@/shared/api/types';
 import { TimelineGrid } from '@/features/timeline/TimelineGrid';
 import { AssetViewer } from '@/features/viewer/AssetViewer';
 import { MediaTypeFilter, type MediaTypeValue } from '@/shared/ui/MediaTypeFilter';
-import { CoverPickerModal } from '@/features/covers/CoverPickerModal';
-import { useCoverPickerHealth } from '@/features/covers/api';
 import { SelectionProvider } from '@/features/selection/SelectionContext';
 import { SelectionBar } from '@/features/selection/SelectionBar';
 import type { TimelineAsset } from '@/shared/api/timeline';
-import type { AlbumResponseDto } from '@immich/sdk';
+import { CoverPicker } from './CoverPicker';
 import { useDeleteAlbum, useRenameAlbum } from './api';
 
 /**
  * A single album.
  *
- * Reuses `TimelineGrid` rather than reimplementing a grid — an album is just a
+ * Reuses `TimelineGrid` rather than reimplementing a grid - an album is just a
  * timeline with `albumId` in the query, so it inherits bucketing,
- * virtualisation and lazy loading for free. Some albums here hold 183,075
- * assets, which rules out any approach that renders them all.
+ * virtualisation and lazy loading for free.
  *
  * The album's metadata comes from the cached album LIST via `useAlbum`, not an
- * individual fetch — v3's AlbumResponseDto carries assetCount and no assets, which
- * for the largest album is a response nobody wants. The grid fetches assets
- * itself, in month-sized pieces.
+ * individual fetch. The grid fetches assets itself, in month-sized pieces.
  *
  * Management lives here too: rename inline on the title, delete behind a
  * confirm dialog, and the cover picker. The rename rides the optimistic
  * mutation in `api.ts`, so the title updates the instant Enter is pressed and
- * only snaps back if the server refuses.
+ * only snaps back if the core refuses.
  */
 export function AlbumDetailPage() {
-  const { albumId } = useParams({ from: '/authed/albums/$albumId' });
+  const { albumId } = useParams({ from: '/app/albums/$albumId' });
   const navigate = useNavigate();
 
   const { data: album, isPending, isError } = useAlbum(albumId);
@@ -41,12 +37,6 @@ export function AlbumDetailPage() {
   const [smartTerm, setSmartTerm] = useState('');
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [pickingCover, setPickingCover] = useState(false);
-
-  // "Is the sidecar up" — one cached probe (see covers/api.ts). Down means the
-  // button renders disabled with an explanation, and nothing else on this page
-  // is any different.
-  const coverHealth = useCoverPickerHealth();
-  const coverPickerDown = coverHealth.data === false;
 
   const query = {
     albumId,
@@ -88,7 +78,10 @@ export function AlbumDetailPage() {
               onSubmit={(event) => {
                 event.preventDefault();
                 if (smartTerm.trim()) {
-                  void navigate({ to: '/search', search: { q: smartTerm.trim(), albumId } });
+                  void navigate({
+                    to: '/search',
+                    search: { q: smartTerm.trim(), albumId, similar: undefined },
+                  });
                 }
               }}
             >
@@ -104,13 +97,11 @@ export function AlbumDetailPage() {
 
             <MediaTypeFilter value={mediaType} onChange={setMediaType} />
 
-            <IndexAlbum album={album} />
-
             <button
               type="button"
               onClick={() => setPickingCover(true)}
-              disabled={coverPickerDown}
-              title={coverPickerDown ? 'The cover picker service is not running' : 'Pick a cover from ranked candidates'}
+              disabled={album.assetCount === 0}
+              title="Choose which picture stands for this album"
               className="inline-flex items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-sm text-ink-muted transition-colors hover:bg-raised hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
@@ -136,8 +127,7 @@ export function AlbumDetailPage() {
       </header>
 
       {/* Same selection scope as the main timeline: the provider wraps this
-          view only, so navigating away ends the selection, and the grid grows
-          its checkboxes because a provider is present. */}
+          view only, so navigating away ends the selection. */}
       <SelectionProvider>
         <div className="min-h-0 flex-1">
           <TimelineGrid
@@ -145,8 +135,8 @@ export function AlbumDetailPage() {
             onSelect={(asset, all) => setViewer({ assets: all, index: all.indexOf(asset) })}
             emptyMessage={
               mediaType === 'ALL'
-                ? 'This album is empty. Select photos in the library and add them, or copy a folder into it.'
-                : `No ${mediaType === 'IMAGE' ? 'photos' : 'videos'} in this album.`
+                ? 'This album is empty. Select pictures in the library and add them here.'
+                : `No ${mediaType === 'IMAGE' ? 'pictures' : 'videos'} in this album.`
             }
           />
         </div>
@@ -163,13 +153,7 @@ export function AlbumDetailPage() {
         />
       )}
 
-      {pickingCover && (
-        <CoverPickerModal
-          albumId={album.id}
-          albumName={album.albumName}
-          onClose={() => setPickingCover(false)}
-        />
-      )}
+      {pickingCover && <CoverPicker album={album} onClose={() => setPickingCover(false)} />}
 
       {confirmingDelete && (
         <DeleteAlbumDialog album={album} onClose={() => setConfirmingDelete(false)} />
@@ -182,17 +166,12 @@ export function AlbumDetailPage() {
  * The title, doubling as the rename control.
  *
  * Clicking the name swaps in an input; the ONLY commit path is blur. Enter and
- * Escape both just blur the input — Enter after setting nothing, Escape after
+ * Escape both just blur the input - Enter after setting nothing, Escape after
  * setting a ref that tells the blur handler to discard. Funnelling everything
- * through one handler avoids the classic double-commit bug where Enter
- * mutates, the state change unmounts the input, and the resulting blur
- * mutates again.
- *
- * The mutation itself is optimistic (see useRenameAlbum in ./api.ts): the
- * title shows the new name immediately, and reverts — with the error shown
- * below — only if the server rejects it.
+ * through one handler avoids the double-commit bug where Enter mutates, the
+ * state change unmounts the input, and the resulting blur mutates again.
  */
-function AlbumTitle({ album }: { album: AlbumResponseDto }) {
+function AlbumTitle({ album }: { album: AlbumDto }) {
   const rename = useRenameAlbum();
   const [draft, setDraft] = useState<string | null>(null);
   const cancelled = useRef(false);
@@ -253,9 +232,7 @@ function AlbumTitle({ album }: { album: AlbumResponseDto }) {
       </h1>
 
       {rename.isError && (
-        <p className="text-xs text-danger">
-          Rename failed: {(rename.error as Error).message}
-        </p>
+        <p className="text-xs text-danger">Rename failed: {apiErrorMessage(rename.error)}</p>
       )}
     </>
   );
@@ -265,16 +242,11 @@ function AlbumTitle({ album }: { album: AlbumResponseDto }) {
  * Delete confirmation.
  *
  * The dialog names the album and its size because "Delete" on a generic
- * confirm is how the wrong album dies — the user should be confirming THIS
- * album, not a yes/no reflex. It also says out loud what deleting an album
- * does NOT do: an album is a grouping, and removing it never touches the
- * photos. That single sentence is the difference between a safe click and a
- * scary one.
- *
- * Escape handling and the scroll lock mirror CoverPickerModal, so every
- * overlay in the app behaves the same way.
+ * confirm is how the wrong album dies. It also says out loud what deleting an
+ * album does NOT do: an album is a grouping, and removing it never touches
+ * the files.
  */
-function DeleteAlbumDialog({ album, onClose }: { album: AlbumResponseDto; onClose: () => void }) {
+function DeleteAlbumDialog({ album, onClose }: { album: AlbumDto; onClose: () => void }) {
   const deleteAlbum = useDeleteAlbum();
   const navigate = useNavigate();
 
@@ -294,10 +266,9 @@ function DeleteAlbumDialog({ album, onClose }: { album: AlbumResponseDto; onClos
   const confirm = () => {
     if (deleteAlbum.isPending) return;
     deleteAlbum.mutate(album.id, {
-      // Navigate away immediately — the page under this dialog derives from
+      // Navigate away immediately - the page under this dialog derives from
       // the album list, and staying while invalidation refetches it would
-      // flash "could not load that album" for an album that simply no longer
-      // exists.
+      // flash "could not load that album" for an album that no longer exists.
       onSuccess: () => void navigate({ to: '/albums' }),
     });
   };
@@ -317,20 +288,18 @@ function DeleteAlbumDialog({ album, onClose }: { album: AlbumResponseDto; onClos
         aria-label={`Delete album ${album.albumName}`}
         className="relative w-full max-w-sm rounded-lg border border-line bg-overlay p-4 shadow-2xl"
       >
-        <h2 className="text-base font-semibold text-ink">
-          Delete “{album.albumName}”?
-        </h2>
+        <h2 className="text-base font-semibold text-ink">Delete “{album.albumName}”?</h2>
 
         <p className="mt-2 text-sm text-ink-muted">
           This removes the album and its{' '}
           <span className="tabular-nums">{album.assetCount.toLocaleString()}</span>{' '}
-          {album.assetCount === 1 ? 'item' : 'items'} from your albums list. The photos and videos
-          themselves are never deleted — they stay in your library and in any other album.
+          {album.assetCount === 1 ? 'item' : 'items'} from your albums list. The files themselves
+          are never touched - they stay on disk, in your library and in any other album.
         </p>
 
         {deleteAlbum.isError && (
           <p className="mt-2 text-xs text-danger">
-            Could not delete the album: {(deleteAlbum.error as Error).message}
+            Could not delete the album: {apiErrorMessage(deleteAlbum.error)}
           </p>
         )}
 

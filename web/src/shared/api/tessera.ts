@@ -1,38 +1,67 @@
-import { sessionHeaders } from './client';
+import { apiUrl, sessionHeaders } from './client';
 
 /**
- * Tessera's own endpoints - the ones with no Immich equivalent.
+ * The one way JSON leaves and enters this app.
  *
- * The generated `@immich/sdk` covers the Immich-shaped surface (timeline,
- * albums, assets, users). Everything Tessera adds beyond that - cover
- * candidates, workers, search - is same-origin under the same `/api`, carries
- * the same session cookie, and is reached through this one wrapper so the
- * error handling lives in one place: a non-2xx becomes a thrown Error carrying
- * the status and the problem title, which TanStack Query then surfaces like
- * any other failure.
- *
- * Same origin is the whole reason no address table is needed here. The app is
- * served by Tessera; `/api/...` is Tessera wherever the app was opened from.
+ * Every request goes through here so three things happen in exactly one
+ * place: the path is resolved against the core's origin, the token rides
+ * along as a bearer header, and a non-2xx answer becomes an `ApiError` that
+ * carries the status and the core's own `detail`. TanStack Query then
+ * surfaces that like any other failure, and a page that wants to react to a
+ * particular status (search's 503 "model not ready") can read it off the
+ * error instead of parsing a message.
  */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly detail: string;
+
+  constructor(status: number, detail: string) {
+    super(`${status} ${detail}`);
+    this.name = 'ApiError';
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
 export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
-  // The active account's token rides along with whatever headers the caller
-  // set (a caller's own Authorization wins), so these endpoints answer as the
-  // same account as the rest of the app: see sessionHeaders.
+  // The token rides along with whatever headers the caller set. A caller's
+  // own Authorization wins, which is what lets a test pin a different one.
   const headers = new Headers(init?.headers);
   for (const [name, value] of Object.entries(sessionHeaders())) {
     if (!headers.has(name)) headers.set(name, value);
   }
-  const response = await fetch(path, { credentials: 'same-origin', ...init, headers });
-  if (!response.ok) {
-    let title = response.statusText;
-    try {
-      const problem = (await response.json()) as { title?: string; detail?: string };
-      title = problem.detail ?? problem.title ?? title;
-    } catch {
-      /* not a problem document; the status text will do */
-    }
-    throw new Error(`${response.status} ${title}`);
+  if (init?.body !== undefined && !headers.has('content-type')) {
+    headers.set('content-type', 'application/json');
   }
-  if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
+
+  const response = await fetch(apiUrl(path), { ...init, headers });
+  if (!response.ok) {
+    throw new ApiError(response.status, await readDetail(response));
+  }
+  // A 204, a 202 "started" or any other answer without a body is undefined,
+  // not a JSON parse error: the core's accept-and-carry-on routes send none.
+  const text = await response.text();
+  if (text.length === 0) return undefined as T;
+  return JSON.parse(text) as T;
+}
+
+/** The core says why in `detail` (contract §4); older routes said it in `title`. */
+async function readDetail(response: Response): Promise<string> {
+  try {
+    const problem = (await response.json()) as { title?: string; detail?: string; message?: string };
+    return problem.detail ?? problem.title ?? problem.message ?? response.statusText;
+  } catch {
+    return response.statusText || `HTTP ${response.status}`;
+  }
+}
+
+/** One place that knows how to read an error for a person. */
+export function apiErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) return error.detail;
+  return error instanceof Error ? error.message : 'Something went wrong.';
+}
+
+/** Is this the core saying "model not ready" (contract §4: 503)? */
+export function isModelNotReady(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 503;
 }

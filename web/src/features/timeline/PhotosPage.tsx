@@ -4,7 +4,7 @@ import { AssetViewer } from '@/features/viewer/AssetViewer';
 import { MediaTypeFilter } from '@/shared/ui/MediaTypeFilter';
 import { SelectionProvider } from '@/features/selection/SelectionContext';
 import { SelectionBar } from '@/features/selection/SelectionBar';
-import { AssetOrder, AssetVisibility } from '@immich/sdk';
+import type { AssetOrder } from '@/shared/api/types';
 import type { TimelineAsset, TimelineAssetType } from '@/shared/api/timeline';
 
 /**
@@ -30,11 +30,11 @@ import type { TimelineAsset, TimelineAssetType } from '@/shared/api/timeline';
  */
 export function PhotosPage() {
   const [mediaType, setMediaType] = useState<TimelineAssetType | 'ALL'>('ALL');
-  const [order, setOrder] = useState<AssetOrder>(AssetOrder.Desc);
+  const [order, setOrder] = useState<AssetOrder>('desc');
   const [viewer, setViewer] = useState<{ assets: TimelineAsset[]; index: number } | null>(null);
 
   const query = {
-    visibility: AssetVisibility.Timeline,
+    visibility: 'timeline' as const,
     withPartners: true,
     order,
     ...(mediaType === 'ALL' ? {} : { assetType: mediaType }),
@@ -92,12 +92,12 @@ function OrderToggle({
   value: AssetOrder;
   onChange: (value: AssetOrder) => void;
 }) {
-  const newestFirst = value === AssetOrder.Desc;
+  const newestFirst = value === 'desc';
 
   return (
     <button
       type="button"
-      onClick={() => onChange(newestFirst ? AssetOrder.Asc : AssetOrder.Desc)}
+      onClick={() => onChange(newestFirst ? 'asc' : 'desc')}
       title={newestFirst ? 'Switch to oldest first' : 'Switch to newest first'}
       className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1.5 text-[13px] font-medium text-ink-muted transition-colors hover:text-ink"
     >

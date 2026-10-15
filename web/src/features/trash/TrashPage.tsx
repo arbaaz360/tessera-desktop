@@ -4,7 +4,7 @@ import { AssetViewer } from '@/features/viewer/AssetViewer';
 import { SelectionProvider, useSelection } from '@/features/selection/SelectionContext';
 import { ConfirmDialog } from '@/features/selection/ConfirmDialog';
 import { useTimeBuckets } from '@/shared/api/queries';
-import { apiErrorMessage } from '@/features/admin/api';
+import { apiErrorMessage } from '@/shared/api/tessera';
 import { useRestoreAll, useRestoreAssets } from './api';
 import type { TimelineAsset } from '@/shared/api/timeline';
 

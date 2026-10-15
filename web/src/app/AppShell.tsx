@@ -1,14 +1,13 @@
 import { Link, Outlet, useRouterState } from '@tanstack/react-router';
 import { useState } from 'react';
-import { useMe } from '@/shared/api/queries';
 import { ThemeToggle } from '@/shared/ui/ThemeToggle';
 import { GlobalSearch } from '@/features/search/GlobalSearch';
-import { AccountMenu } from '@/features/auth/AccountMenu';
+import { useLibrary } from '@/features/library/api';
 
 /**
  * Application shell: sidebar, top bar, and the routed page.
  *
- * The shell is deliberately thin. It owns navigation chrome and nothing else —
+ * The shell is deliberately thin. It owns navigation chrome and nothing else -
  * no data fetching for pages, no page-specific state. That keeps every page
  * independently understandable and means adding a route touches one file.
  */
@@ -20,32 +19,25 @@ interface NavItem {
 }
 
 const NAV: NavItem[] = [
-  { to: '/photos', label: 'Photos', icon: <IconPhotos /> },
+  { to: '/photos', label: 'Pictures', icon: <IconPhotos /> },
   { to: '/albums', label: 'Albums', icon: <IconAlbums /> },
-  { to: '/faces', label: 'Find a face', icon: <IconFaceSearch /> },
   { to: '/search', label: 'Search', icon: <IconSearch /> },
-  { to: '/music', label: 'Music', icon: <IconMusic /> },
   { to: '/trash', label: 'Trash', icon: <IconTrash /> },
 ];
 
-/**
- * Operational pages, separated from browsing by a divider. Jobs is visible to
- * everyone — watching a queue drain harms nothing — while Admin appears only
- * for admin accounts, matching what the server will authorize anyway.
- */
+/** The library's machinery, separated from browsing by a divider. */
 const OPS_NAV: NavItem[] = [
-  { to: '/jobs', label: 'Jobs', icon: <IconJobs /> },
-  { to: '/admin', label: 'Admin', icon: <IconAdmin /> },
+  { to: '/library', label: 'Library', icon: <IconLibrary /> },
+  { to: '/settings', label: 'Settings', icon: <IconSettings /> },
 ];
 
 export function AppShell() {
-  const { data: me } = useMe();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
 
   return (
     <div className="flex h-full bg-ground text-ink">
-      {/* Mobile scrim */}
+      {/* Narrow-window scrim */}
       {sidebarOpen && (
         <button
           type="button"
@@ -63,9 +55,9 @@ export function AppShell() {
       >
         <div className="flex h-14 items-center gap-2.5 px-5">
           <span className="grid h-7 w-7 place-items-center rounded-md bg-accent text-sm font-bold text-ink-inverse">
-            P
+            T
           </span>
-          <span className="text-[15px] font-semibold tracking-tight">Photos</span>
+          <span className="text-[15px] font-semibold tracking-tight">Tessera</span>
         </div>
 
         <nav className="flex-1 space-y-0.5 overflow-y-auto px-3 py-2">
@@ -75,13 +67,12 @@ export function AppShell() {
 
           <div className="my-2 border-t border-line-soft" role="separator" />
 
-          {OPS_NAV.filter((item) => item.to !== '/admin' || me?.isAdmin).map((item) => (
+          {OPS_NAV.map((item) => (
             <NavLink key={item.to} item={item} pathname={pathname} onNavigate={() => setSidebarOpen(false)} />
           ))}
-
         </nav>
 
-        {me && <AccountMenu me={me} />}
+        <LibraryFooter />
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
@@ -99,8 +90,8 @@ export function AppShell() {
 
           <div className="ml-auto flex items-center gap-2">
             {/* Theme sits in the header rather than a settings page: it is a
-                per-device preference someone changes by looking at the result,
-                so it belongs where the result is visible. */}
+                preference someone changes by looking at the result, so it
+                belongs where the result is visible. */}
             <ThemeToggle />
           </div>
         </header>
@@ -113,14 +104,34 @@ export function AppShell() {
   );
 }
 
-function IconFaceSearch() {
+/**
+ * The numbers that matter at a glance, at the foot of the sidebar: how many
+ * pictures, and whether the free tier has stopped indexing. The library
+ * query is shared with the Library page, so this costs no extra request.
+ */
+function LibraryFooter() {
+  const { data } = useLibrary();
+  if (!data) return null;
+
+  const pictures = data.roots.reduce((sum, root) => sum + root.counts.contents, 0);
+
   return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden>
-      <circle cx="10" cy="8" r="4" />
-      <path d="M3 20c0-3.5 3-6 7-6 1.2 0 2.3.2 3.2.6" />
-      <circle cx="17.5" cy="16.5" r="3" />
-      <path d="m19.8 18.8 2 2" />
-    </svg>
+    <div className="border-t border-line p-3 text-xs text-ink-faint">
+      <p className="tabular-nums">
+        <span className="text-ink-muted">{pictures.toLocaleString()}</span> pictures ·{' '}
+        <span className="text-ink-muted">{data.roots.length}</span>{' '}
+        {data.roots.length === 1 ? 'folder' : 'folders'}
+      </p>
+      {data.licence.capReached && (
+        <Link
+          to="/settings"
+          hash="licence"
+          className="mt-1.5 block rounded-md border border-accent/40 bg-accent-muted px-2 py-1.5 text-accent hover:border-accent"
+        >
+          Free tier: indexing stopped at {data.licence.cap.toLocaleString()}. Unlock →
+        </Link>
+      )}
+    </div>
   );
 }
 
@@ -190,16 +201,6 @@ function IconMenu() {
   );
 }
 
-function IconMusic() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
-      <path d="M9 18V6l11-2v12" />
-      <circle cx="6.5" cy="18" r="2.5" />
-      <circle cx="17.5" cy="16" r="2.5" />
-    </svg>
-  );
-}
-
 function IconTrash() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
@@ -209,15 +210,16 @@ function IconTrash() {
   );
 }
 
-function IconJobs() {
+function IconLibrary() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
-      <path d="M4 17l5-5-5-5M12 19h8" />
+      <path d="M3 4h5l2 2h11v13H3z" />
+      <path d="M3 10h18" />
     </svg>
   );
 }
 
-function IconAdmin() {
+function IconSettings() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
       <circle cx="12" cy="12" r="3" />
