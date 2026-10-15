@@ -53,8 +53,10 @@ impl FileLogger {
 }
 
 impl Log for FileLogger {
+    /// Everything from this crate and the core; from dependencies, info and up.
     fn enabled(&self, m: &Metadata) -> bool {
-        m.level() <= Level::Debug
+        let ours = m.target().starts_with("tessera_desktop") || m.target() == "core";
+        m.level() <= if ours { Level::Debug } else { Level::Info }
     }
 
     fn log(&self, r: &Record) {
