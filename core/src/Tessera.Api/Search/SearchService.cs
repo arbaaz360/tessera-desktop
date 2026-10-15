@@ -45,9 +45,18 @@ public sealed class SearchService(Db db, IImageEmbedder embedder, IVectorIndex i
         return RankAsync(accountId, vector, q, excludeId: null, ct);
     }
 
-    /// <summary>"More like this": the picture's own vector as the query. Null when it has no thumbnail to embed from.</summary>
+    /// <summary>
+    /// "More like this": the picture's own vector as the query, read back
+    /// from the index; failing that, its thumbnail embedded again. Null when
+    /// neither is possible.
+    /// </summary>
     public async Task<IReadOnlyList<SearchHit>?> SimilarAsync(long accountId, long contentId, SearchQuery q, CancellationToken ct)
     {
+        if (index.TryGet(contentId, out var stored))
+        {
+            return await RankAsync(accountId, stored, q, excludeId: contentId, ct);
+        }
+
         byte[]? sha;
         await using (var conn = await db.OpenAsync(ct))
         {

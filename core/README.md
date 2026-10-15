@@ -86,7 +86,9 @@ Kept exactly as the web app calls them (CONTRACT §3): `/api/timeline/buckets`,
 `DELETE /api/assets` (trash; `force` is a 403), `/api/trash/restore`,
 `/api/trash/restore/assets`, `/api/trash/empty` (403, always), `/api/albums`
 and `/api/albums/{id}` CRUD, `/{id}/assets`, `/{id}/stats`, `/{id}/cover`,
-`/api/albums/overlap` (an empty list: one account), `/api/download/archive`,
+`/api/albums/overlap` (an empty list: one account). `PATCH /api/albums/{id}`
+also takes `albumThumbnailAssetId`, the cover choice, as Immich's does.
+`/api/download/archive`,
 `/api/media/{id}/thumb|original`, `/api/scan/roots/{id}/scan?folder=`,
 `/api/scan/folders`.
 
@@ -107,7 +109,9 @@ refreshed every two seconds while it runs.
 | Scans | reconciliation, not events: walk, hash what changed (size+mtime trusted), mark what was not seen. A walk that finds under half of what is known marks nothing gone. One scan at a time, queued per root or folder; the run row exists from the moment it is queued |
 | Watch | one stat per root per minute on the parent folder, a few hundred child stats round-robin; a folder that stops changing for a minute is queued for a scan. Nothing waits for a person |
 | Thumbnails | 320 px WebP at `thumbs/ab/cd/<sha>-thumb.webp`, path derived never stored. Skia; `sips` on macOS for HEIC and friends; elsewhere those are failed items with the reason |
-| Embeddings | decode the thumbnail, `IImageEmbedder.EmbedImage`, `IVectorIndex.Upsert`, an `embedding` ledger row; the index file `vectors/<model>.bin` is saved every minute while it changes and at shutdown, and reconciled with the ledger at start |
+| Embeddings | decode up to 8 thumbnails, one `EmbedImages` call for the batch (the real model batches onto the GPU: 116 against 17 images/s one at a time), `IVectorIndex.Upsert` each, the `embedding` ledger rows in one transaction; the index file `vectors/<model>.bin` is saved every minute while it changes and at shutdown, and reconciled with the ledger at start |
+| Search | words to a vector, cosine over the index, then album, kind and date filters against SQLite. `mode=metadata` is a file-name query and never needs the model. "More like this" reads the picture's vector back with `TryGet` and only re-embeds the thumbnail when the index does not hold it |
+| CORS | the shell's origin (plus Vite's under `TESSERA_DEV=1`): GET, POST, PUT, PATCH, DELETE, OPTIONS; headers Authorization, Content-Type, Range; credentials; preflight answers 204 |
 | Free tier | while `free` and more than 2,000 distinct contents are indexed, the first 2,000 by id keep working and the rest get no thumbnail or vector; `PUT /api/licence {"state":"licensed"}` queues them |
 | Writes | one in-process writer (`Db.OpenWriteAsync`). Microsoft.Data.Sqlite waits for a busy database by sleeping 150 ms, so letting four threads contend cost a second per write; queued in-process, a rescan of 200 files went from 5 s to 23 ms |
 | Files | image files are opened through .NET streams, never Skia's `fopen`, which is ANSI and bound by MAX_PATH; a 259-character thumbnail path once failed every embedding |
@@ -136,9 +140,11 @@ embedder.
 ## Not done
 
 - **The real model.** `FakeImageEmbedder` (sha256-derived vectors) and
-  `InMemoryVectorIndex` stand in until the search library merges; the swap
-  is the two `AddSingleton` lines under "search" in `Program.cs`. Text
-  search therefore returns something but means nothing yet.
+  `InMemoryVectorIndex` stand in until the search library is wired in; the
+  swap is the two `AddSingleton` lines under "search" in `Program.cs`. Text
+  search therefore returns something but means nothing yet. The core does
+  not reference ONNX Runtime; the search library picks DirectML or the base
+  package by RID.
 - **Video thumbnails.** No ffmpeg in this build: videos are indexed, listed
   and served, but have no thumbnail and are not counted as pending.
 - **HEIC, AVIF, TIFF, JXL, RAW on Windows.** Recorded as failed items with
@@ -151,6 +157,6 @@ embedder.
 - The watch polls directory mtimes; there is no OS file-system watcher.
 - `GET /api/scan/folders` lost `autoScanMaxEntries`; nothing waits for a
   person any more. `waitingForYou` is kept and always false.
-- "More like this" re-embeds the picture's thumbnail because `IVectorIndex`
-  has no way to read a stored vector back; a `TryGet` on the interface
-  would save that.
+- `IImageEmbedder.EmbedImages` and `IVectorIndex.TryGet` are on the fakes
+  and called as if on the interfaces; until the coordinator's interface
+  change lands, `Search/InterfaceShims.cs` routes the calls. Delete it then.

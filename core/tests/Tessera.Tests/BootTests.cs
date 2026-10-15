@@ -64,6 +64,47 @@ public sealed class BootTests
         Assert.Equal(HttpStatusCode.OK, (await http.GetAsync($"/api/library?sessionKey={home.Token}")).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await http.GetAsync($"/api/no-such-route?sessionKey={home.Token}")).StatusCode);
 
+        // File-name search needs no model: it answers even when nothing is loaded.
+        Assert.Equal(HttpStatusCode.OK, (await http.GetAsync($"/api/search?mode=metadata&q=nothing&limit=5&sessionKey={home.Token}")).StatusCode);
+
+        // The webview preflights PATCH and DELETE-with-a-body.
+        using (var preflight = new HttpRequestMessage(HttpMethod.Options, "/api/albums/1"))
+        {
+            preflight.Headers.Add("Origin", "http://tauri.localhost");
+            preflight.Headers.Add("Access-Control-Request-Method", "PATCH");
+            preflight.Headers.Add("Access-Control-Request-Headers", "authorization,content-type");
+            using var response = await http.SendAsync(preflight);
+            Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+            Assert.Equal("http://tauri.localhost", response.Headers.GetValues("Access-Control-Allow-Origin").Single());
+            Assert.Contains("PATCH", response.Headers.GetValues("Access-Control-Allow-Methods").Single(), StringComparison.Ordinal);
+            Assert.Equal("true", response.Headers.GetValues("Access-Control-Allow-Credentials").Single());
+        }
+
+        using (var elsewhere = new HttpRequestMessage(HttpMethod.Options, "/api/albums/1"))
+        {
+            elsewhere.Headers.Add("Origin", "http://evil.example");
+            elsewhere.Headers.Add("Access-Control-Request-Method", "PATCH");
+            using var response = await http.SendAsync(elsewhere);
+            Assert.False(response.Headers.Contains("Access-Control-Allow-Origin"));
+        }
+
+        // PATCH /api/albums/{id} carries the cover choice; an unknown picture is refused, not ignored.
+        using (var create = new HttpRequestMessage(HttpMethod.Post, "/api/albums"))
+        {
+            create.Headers.Authorization = new AuthenticationHeaderValue("Bearer", home.Token);
+            create.Content = JsonContent.Create(new { albumName = "Covers" });
+            using var created = await http.SendAsync(create);
+            Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+            var album = await created.Content.ReadFromJsonAsync<JsonElement>();
+            var albumId = album.GetProperty("id").GetString();
+
+            using var patch = new HttpRequestMessage(HttpMethod.Patch, $"/api/albums/{albumId}");
+            patch.Headers.Authorization = new AuthenticationHeaderValue("Bearer", home.Token);
+            patch.Content = JsonContent.Create(new { albumThumbnailAssetId = "999999" });
+            using var patched = await http.SendAsync(patch);
+            Assert.Equal(HttpStatusCode.BadRequest, patched.StatusCode);
+        }
+
         var pidFile = Path.Combine(home.DataDir, "core.pid");
         Assert.Equal(core.Process.Id.ToString(System.Globalization.CultureInfo.InvariantCulture), (await File.ReadAllTextAsync(pidFile)).Trim());
         Assert.True(File.Exists(Path.Combine(home.DataDir, "library.db")));

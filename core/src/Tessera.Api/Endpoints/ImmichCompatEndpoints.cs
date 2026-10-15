@@ -567,6 +567,22 @@ public static class ImmichCompatEndpoints
                 return Api.NotFound();
             }
 
+            // Immich's UpdateAlbumDto carries the cover here too; the web's
+            // cover picker sends it on this route. A choice is final until
+            // the next choice.
+            if (body.AlbumThumbnailAssetId is { } coverId)
+            {
+                if (!Api.TryParseId(coverId, out var contentId))
+                {
+                    return Api.Fail(StatusCodes.Status400BadRequest, "albumThumbnailAssetId is not an id this server issued");
+                }
+
+                if (!await albums.SetCoverAsync(me.AccountIdOrThrow, albumId, contentId, ct))
+                {
+                    return Api.Fail(StatusCodes.Status400BadRequest, "That picture is not in this album");
+                }
+            }
+
             return Results.Ok(Dto((await albums.GetAsync(me.AccountIdOrThrow, albumId, ct))!));
         });
 
@@ -619,7 +635,7 @@ public static class ImmichCompatEndpoints
     }
 
     public sealed record CreateAlbumBody(string AlbumName, string? Description, string[]? AssetIds);
-    public sealed record UpdateAlbumBody(string? AlbumName, string? Description);
+    public sealed record UpdateAlbumBody(string? AlbumName, string? Description, string? AlbumThumbnailAssetId);
     public sealed record BulkIdsBody(string[] Ids);
 
     /// <summary>

@@ -125,13 +125,15 @@ try
     });
 
     // -------------------------------------------------------------- cors
-    // One origin: the shell's. Plus Vite's in dev. Credentials are allowed so a
-    // fetch with credentials: 'include' is not refused by the browser.
+    // One origin: the shell's. Plus Vite's in dev. The webview preflights
+    // PATCH and DELETE-with-a-body, so the methods and headers are listed
+    // outright; credentials are allowed so a fetch with credentials:
+    // 'include' is not refused by the browser. Preflights answer 204.
     const string WebCors = "web";
     builder.Services.AddCors(o => o.AddPolicy(WebCors, p => p
         .WithOrigins(env.AllowedOrigins)
-        .AllowAnyHeader()
-        .AllowAnyMethod()
+        .WithMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+        .WithHeaders("Authorization", "Content-Type", "Range")
         .AllowCredentials()));
 
     var app = builder.Build();

@@ -40,6 +40,35 @@ public sealed class FakeSearchTests
     }
 
     [Fact]
+    public void A_batch_answers_in_input_order_with_the_same_vectors_as_one_at_a_time()
+    {
+        var embedder = new FakeImageEmbedder();
+        using var a = Bitmap(1);
+        using var b = Bitmap(2);
+        using var c = Bitmap(3);
+        var batch = embedder.EmbedImages([a, b, c]);
+        Assert.Equal(3, batch.Length);
+        Assert.Equal(embedder.EmbedImage(a), batch[0]);
+        Assert.Equal(embedder.EmbedImage(b), batch[1]);
+        Assert.Equal(embedder.EmbedImage(c), batch[2]);
+        Assert.Empty(embedder.EmbedImages([]));
+    }
+
+    [Fact]
+    public void The_index_hands_a_stored_vector_back()
+    {
+        using var index = new InMemoryVectorIndex(4);
+        index.Upsert(7, [0.5f, 0.5f, 0.5f, 0.5f]);
+        Assert.True(index.TryGet(7, out var v));
+        Assert.Equal([0.5f, 0.5f, 0.5f, 0.5f], v);
+        v[0] = 9f;   // a copy, not the index's own memory
+        Assert.True(index.TryGet(7, out var again));
+        Assert.Equal(0.5f, again[0]);
+        Assert.False(index.TryGet(8, out var none));
+        Assert.Empty(none);
+    }
+
+    [Fact]
     public void Text_is_hashed_by_its_words()
     {
         var embedder = new FakeImageEmbedder();

@@ -39,6 +39,19 @@ public sealed class FakeImageEmbedder : IImageEmbedder
         return FromSeed(SHA256.HashData(pixels));
     }
 
+    /// <summary>Several at once, answered in input order. The real library batches these onto the GPU.</summary>
+    public float[][] EmbedImages(IReadOnlyList<SKBitmap> bitmaps)
+    {
+        ArgumentNullException.ThrowIfNull(bitmaps);
+        var vectors = new float[bitmaps.Count][];
+        for (var i = 0; i < bitmaps.Count; i++)
+        {
+            vectors[i] = EmbedImage(bitmaps[i]);
+        }
+
+        return vectors;
+    }
+
     public float[] EmbedText(string text)
     {
         if (string.IsNullOrWhiteSpace(text))

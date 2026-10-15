@@ -118,6 +118,27 @@ public sealed class InMemoryVectorIndex(int dimensions) : IVectorIndex, IDisposa
         }
     }
 
+    /// <summary>The stored vector for an id, copied out; false when the index does not hold it.</summary>
+    public bool TryGet(long id, out float[] vector)
+    {
+        _lock.EnterReadLock();
+        try
+        {
+            if (_rows.TryGetValue(id, out var row))
+            {
+                vector = (float[])_vectors[row].Clone();
+                return true;
+            }
+        }
+        finally
+        {
+            _lock.ExitReadLock();
+        }
+
+        vector = [];
+        return false;
+    }
+
     public IReadOnlyList<VectorHit> Search(ReadOnlySpan<float> query, int k, Func<long, bool>? filter = null)
     {
         if (query.Length != dimensions)
