@@ -10,7 +10,8 @@
 //! - exits when stdin reaches EOF (`STUB_IGNORE_STDIN=1` turns that off, to
 //!   leave an orphan behind on purpose and watch the shell kill it),
 //! - `STUB_CRASH_AFTER_MS=<n>` makes it exit with code 7 after n ms, to watch
-//!   the restart policy.
+//!   the restart policy,
+//! - `STUB_SILENT=1` never prints the ready line, to watch the ready timeout.
 
 use std::{
     env,
@@ -79,11 +80,16 @@ fn main() {
     };
     let port = server.server_addr().to_ip().expect("ip").port();
 
-    // The one line on stdout, ever.
-    println!(
-        "{{\"event\":\"ready\",\"port\":{port},\"pid\":{},\"version\":\"0.0.0-stub\"}}",
-        process::id()
-    );
+    // The one line on stdout, ever. `STUB_SILENT=1` withholds it, to watch
+    // the shell's 30 s ready timeout.
+    if env::var("STUB_SILENT").is_ok() {
+        log("warn", "STUB_SILENT set; not printing the ready line");
+    } else {
+        println!(
+            "{{\"event\":\"ready\",\"port\":{port},\"pid\":{},\"version\":\"0.0.0-stub\"}}",
+            process::id()
+        );
+    }
     log(
         "info",
         &format!(

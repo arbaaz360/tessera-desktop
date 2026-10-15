@@ -46,8 +46,15 @@ nor the network.
 ```bash
 bash src-tauri/tools/use-stub.sh
 cd src-tauri
-pnpm dlx @tauri-apps/cli@2 dev --config tauri.stub.conf.json --no-watch
+pnpm dlx @tauri-apps/cli@2 dev --config tauri.stub.conf.json --no-watch --no-dev-server
 ```
+
+`--no-dev-server` matters: without it `tauri dev` serves the static page from
+its own server on `http://127.0.0.1:1430`, the page's origin is that, and the
+core (which allows `http://tauri.localhost` only) refuses its requests with
+CORS. With the flag the page loads from the app's own origin, as in a release
+build. The real web app in `tauri dev` loads from `http://localhost:5173`,
+which the core allows because of `TESSERA_DEV=1`.
 
 The window shows the dev page. On load it calls `app_version`, `licence_get`
 and `core_info`, then `GET /api/licence` on the core with the token. Every
