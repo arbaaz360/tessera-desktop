@@ -1,47 +1,114 @@
-using Microsoft.Extensions.Options;
-using Npgsql;
+using System.Data;
+using System.Globalization;
+using Dapper;
+using Microsoft.Data.Sqlite;
 
 namespace Tessera.Data;
 
-public sealed class TesseraDbOptions
-{
-    public const string Section = "ConnectionStrings";
-    public string Tessera { get; set; } = "";
-}
-
 /// <summary>
-/// Hands out connections from one pooled data source.
+/// Hands out connections to the one SQLite file, <c>library.db</c>.
 /// </summary>
 /// <remarks>
-/// A single <see cref="NpgsqlDataSource"/> for the process: it owns the pool,
-/// prepares statements across connections, and is the only thing that should
-/// ever parse the connection string. Creating connections ad hoc from a string
-/// is how a service ends up with several pools and a confusing connection
-/// ceiling.
+/// <para>
+/// WAL mode, so readers never wait for the one writer and the grid keeps
+/// scrolling while a scan records files. <c>synchronous=NORMAL</c> under WAL
+/// is durable against a process crash and loses at most the last
+/// transactions on power loss, which for an index of files that are still on
+/// disk is the right trade. Microsoft.Data.Sqlite pools connections, so
+/// opening one per operation is a dictionary lookup, not a file open.
+/// </para>
+/// <para>
+/// Every timestamp is an INTEGER of Unix milliseconds, UTC. Dapper converts
+/// <see cref="DateTimeOffset"/> both ways through one type handler, and SQL
+/// that needs "now" uses <see cref="NowMs"/>, so there is one clock and one
+/// unit in the whole database.
+/// </para>
 /// </remarks>
-public sealed class Db : IAsyncDisposable
+public sealed class Db : IDisposable
 {
-    private readonly NpgsqlDataSource _source;
+    /// <summary>"Now" in SQL, as the same Unix milliseconds the application writes.</summary>
+    public const string NowMs = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
 
-    public Db(IOptions<TesseraDbOptions> options)
+    private readonly string _connectionString;
+
+    static Db()
     {
-        var cs = options.Value.Tessera;
-        if (string.IsNullOrWhiteSpace(cs))
-        {
-            throw new InvalidOperationException(
-                "ConnectionStrings:Tessera is not configured.");
-        }
+        // Dapper maps snake_case columns onto PascalCase properties without an
+        // alias on every column.
+        DefaultTypeMap.MatchNamesWithUnderscores = true;
 
-        var builder = new NpgsqlDataSourceBuilder(cs);
-        builder.EnableDynamicJson();
-        _source = builder.Build();
+        // Dapper consults its built-in type map before any handler, so the
+        // built-in DateTimeOffset entry must go or parameters would be sent as
+        // ISO text into INTEGER columns.
+        SqlMapper.RemoveTypeMap(typeof(DateTimeOffset));
+        SqlMapper.RemoveTypeMap(typeof(DateTimeOffset?));
+        SqlMapper.AddTypeHandler(new UnixMillisecondsHandler());
     }
 
-    public ValueTask<NpgsqlConnection> OpenAsync(CancellationToken ct = default) =>
-        _source.OpenConnectionAsync(ct);
+    public Db(string path)
+    {
+        Path = path;
+        _connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Private,
+            Pooling = true,
+            // Also the busy timeout: how long a writer waits for another writer.
+            DefaultTimeout = 30,
+        }.ToString();
 
-    /// <summary>For binary COPY, which is the only sane way to load millions of rows.</summary>
-    public NpgsqlDataSource Source => _source;
+        // Persistent in the file; set once.
+        using var conn = new SqliteConnection(_connectionString);
+        conn.Open();
+        conn.Execute("PRAGMA journal_mode=WAL");
+        conn.Execute("PRAGMA synchronous=NORMAL");
+    }
 
-    public ValueTask DisposeAsync() => _source.DisposeAsync();
+    public string Path { get; }
+
+    public async ValueTask<SqliteConnection> OpenAsync(CancellationToken ct = default)
+    {
+        var conn = new SqliteConnection(_connectionString);
+        try
+        {
+            await conn.OpenAsync(ct);
+            // Per connection, not per file: foreign keys are off by default in
+            // SQLite and the schema's ON DELETE CASCADE rules depend on them.
+            await conn.ExecuteAsync("PRAGMA foreign_keys=ON");
+            return conn;
+        }
+        catch
+        {
+            await conn.DisposeAsync();
+            throw;
+        }
+    }
+
+    public static long ToMs(DateTimeOffset t) => t.ToUnixTimeMilliseconds();
+    public static long? ToMs(DateTimeOffset? t) => t is { } v ? v.ToUnixTimeMilliseconds() : null;
+    public static DateTimeOffset FromMs(long ms) => DateTimeOffset.FromUnixTimeMilliseconds(ms);
+    public static DateTimeOffset? FromMs(long? ms) => ms is { } v ? FromMs(v) : null;
+
+    /// <summary>Drop the pooled connections, so the file can be deleted (tests) or the process can exit cleanly.</summary>
+    public void Dispose() => SqliteConnection.ClearPool(new SqliteConnection(_connectionString));
+}
+
+/// <summary>DateTimeOffset on the way in and out: Unix milliseconds, UTC.</summary>
+internal sealed class UnixMillisecondsHandler : SqlMapper.TypeHandler<DateTimeOffset>
+{
+    public override void SetValue(IDbDataParameter parameter, DateTimeOffset value)
+    {
+        parameter.DbType = DbType.Int64;
+        parameter.Value = value.ToUnixTimeMilliseconds();
+    }
+
+    public override DateTimeOffset Parse(object value) => value switch
+    {
+        long ms => DateTimeOffset.FromUnixTimeMilliseconds(ms),
+        int ms => DateTimeOffset.FromUnixTimeMilliseconds(ms),
+        double ms => DateTimeOffset.FromUnixTimeMilliseconds((long)ms),
+        string s => DateTimeOffset.Parse(s, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal),
+        _ => throw new DataException($"Cannot read a timestamp from {value.GetType().Name}"),
+    };
 }

@@ -11,10 +11,15 @@
   <ItemGroup>
     <!-- Dapper over EF Core deliberately. Every query here is either a hot
          read on a known shape or a bulk write; an ORM's change tracker buys
-         nothing and its generated SQL is the thing you end up fighting. Bulk
-         paths use Npgsql's binary COPY, which no ORM exposes. -->
+         nothing and its generated SQL is the thing you end up fighting. -->
     <PackageReference Include="Dapper" Version="2.1.66" />
-    <PackageReference Include="Npgsql" Version="9.0.3" />
+    <!-- SQLite, with e_sqlite3 bundled for win-x64 and osx-arm64. One file,
+         no service, no installer. -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+    <!-- Pinned above what Microsoft.Data.Sqlite asks for: the bundle it
+         pulls has a published SQLite advisory, and the audit rightly refuses
+         to build on it. -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.14" />
     <PackageReference Include="Microsoft.Extensions.Options" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
   </ItemGroup>
@@ -23,9 +28,8 @@
     <ProjectReference Include="..\Tessera.Core\Tessera.Core.csproj" />
   </ItemGroup>
 
-
   <ItemGroup>
-    <!-- Migrations travel inside the assembly, so the code and the schema it
+    <!-- The schema travels inside the assembly, so the code and the schema it
          expects cannot be deployed apart. -->
     <EmbeddedResource Include="Migrations\*.sql" />
   </ItemGroup>
