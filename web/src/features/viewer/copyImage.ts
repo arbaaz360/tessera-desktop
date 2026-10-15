@@ -34,7 +34,7 @@ export function canCopyImages(): boolean {
 
 /** Why copying is unavailable, phrased for someone who can act on it. */
 export const INSECURE_CONTEXT_HINT =
-  'Copying needs a secure connection. Open this page as https://immich.samurai.local (or via localhost) and the copy button appears.';
+  'Copying needs a secure context, which the desktop app always has. In a browser, open the app from localhost.';
 
 async function toPngBlob(source: Blob): Promise<Blob> {
   const bitmap = await createImageBitmap(source);

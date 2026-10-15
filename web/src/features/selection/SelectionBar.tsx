@@ -2,16 +2,8 @@ import { useState } from 'react';
 import { useSelection } from './SelectionContext';
 import { AlbumPicker } from './AlbumPicker';
 import { ConfirmDialog } from './ConfirmDialog';
-import {
-  DOWNLOAD_WARN_THRESHOLD,
-  useBulkAddToAlbum,
-  useBulkDownload,
-  useBulkFavorite,
-  useBulkTrash,
-} from './api';
-// Reused rather than re-implemented: admin/api.ts already knows how to read
-// an SDK HttpError, and the knowledge should exist once.
-import { apiErrorMessage } from '@/features/admin/api';
+import { useBulkAddToAlbum, useBulkFavorite, useBulkTrash } from './api';
+import { apiErrorMessage } from '@/shared/api/tessera';
 
 /**
  * The floating action bar for a live selection.
@@ -19,15 +11,15 @@ import { apiErrorMessage } from '@/features/admin/api';
  * Mounted by any page that wraps its grid in `SelectionProvider`; it renders
  * nothing while the selection is empty, so pages can mount it unconditionally.
  *
- * Which dialog is open is ONE state field, not four booleans — two dialogs at
- * once is not a state this UI can be in, and modelling it as a union makes
+ * Which dialog is open is ONE state field, not several booleans - two dialogs
+ * at once is not a state this UI can be in, and modelling it as a union makes
  * that unrepresentable instead of merely unlikely.
  *
- * Post-action behaviour is deliberate: favorite/unfavorite and add-to-album
- * KEEP the selection (people chain those — favorite fifty, then album them);
+ * Post-action behaviour is deliberate: favourite/unfavourite and add-to-album
+ * KEEP the selection (people chain those - favourite fifty, then album them);
  * trash CLEARS it, because the selected things no longer exist here.
  */
-type OpenPanel = 'none' | 'albums' | 'download-warning' | 'trash-confirm';
+type OpenPanel = 'none' | 'albums' | 'trash-confirm';
 
 export function SelectionBar() {
   const selection = useSelection();
@@ -35,19 +27,12 @@ export function SelectionBar() {
 
   const favorite = useBulkFavorite();
   const addToAlbum = useBulkAddToAlbum();
-  const download = useBulkDownload();
   const trash = useBulkTrash();
 
   if (!selection.active) return null;
 
   const ids = [...selection.selected];
-  const error =
-    favorite.error ?? addToAlbum.error ?? download.error ?? trash.error ?? null;
-
-  const runDownload = () => {
-    setPanel('none');
-    download.mutate(ids);
-  };
+  const error = favorite.error ?? addToAlbum.error ?? trash.error ?? null;
 
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-6 z-40 flex flex-col items-center gap-2 px-4">
@@ -76,13 +61,13 @@ export function SelectionBar() {
         <Divider />
 
         <BarButton
-          label="Favorite"
+          label="Favourite"
           busy={favorite.isPending}
           onClick={() => favorite.mutate({ ids, isFavorite: true })}
           icon={<StarIcon filled />}
         />
         <BarButton
-          label="Unfavorite"
+          label="Unfavourite"
           busy={favorite.isPending}
           onClick={() => favorite.mutate({ ids, isFavorite: false })}
           icon={<StarIcon />}
@@ -94,17 +79,7 @@ export function SelectionBar() {
           icon={<AlbumIcon />}
         />
         <BarButton
-          label="Download"
-          busy={download.isPending}
-          onClick={() =>
-            // Past the threshold the server will be zipping originals for a
-            // while and the archive may run to gigabytes — worth a pause.
-            ids.length > DOWNLOAD_WARN_THRESHOLD ? setPanel('download-warning') : runDownload()
-          }
-          icon={<DownloadIcon />}
-        />
-        <BarButton
-          label="Delete"
+          label="Move to trash"
           danger
           busy={trash.isPending}
           onClick={() => setPanel('trash-confirm')}
@@ -115,20 +90,6 @@ export function SelectionBar() {
 
         <BarButton label="Clear selection" onClick={selection.clear} icon={<CloseIcon />} />
       </div>
-
-      {panel === 'download-warning' && (
-        <ConfirmDialog
-          title="Large download"
-          confirmLabel={`Download ${ids.length.toLocaleString()} items`}
-          busy={download.isPending}
-          onConfirm={runDownload}
-          onCancel={() => setPanel('none')}
-        >
-          You are about to archive {ids.length.toLocaleString()} original files. The server
-          zips them before the download starts, so this can take a while and produce a very
-          large file.
-        </ConfirmDialog>
-      )}
 
       {panel === 'trash-confirm' && (
         <ConfirmDialog
@@ -146,8 +107,8 @@ export function SelectionBar() {
           }
           onCancel={() => setPanel('none')}
         >
-          {ids.length.toLocaleString()} item{ids.length === 1 ? '' : 's'} will move to the
-          trash. Nothing is deleted permanently — you can restore them from the Trash page.
+          {ids.length.toLocaleString()} item{ids.length === 1 ? '' : 's'} will be hidden in the
+          trash. The files on disk are not touched - you can restore them from the Trash page.
         </ConfirmDialog>
       )}
     </div>
@@ -187,9 +148,6 @@ function Divider() {
   return <span aria-hidden className="mx-0.5 h-5 w-px bg-line" />;
 }
 
-/* Icons are inline SVG, matching the rest of the app: no icon dependency,
-   and `currentColor` inherits each button's hover state for free. */
-
 function StarIcon({ filled }: { filled?: boolean }) {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill={filled ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" aria-hidden>
@@ -203,14 +161,6 @@ function AlbumIcon() {
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
       <rect x="3" y="5" width="14" height="14" rx="2" />
       <path d="M21 8v9a3 3 0 0 1-3 3h-9M7 15l3-3 4 4M13 11l2-2 2 2" />
-    </svg>
-  );
-}
-
-function DownloadIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
-      <path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16" />
     </svg>
   );
 }
