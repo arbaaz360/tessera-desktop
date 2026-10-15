@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Globalization;
 using Dapper;
 using Microsoft.Extensions.Options;
 using SkiaSharp;
@@ -6,6 +8,9 @@ using Tessera.Data;
 using Tessera.Data.Repositories;
 
 namespace Tessera.Api.Workers;
+
+/// <summary>A format this build cannot decode on this platform. Recorded, not retried.</summary>
+public sealed class UnsupportedFormatException(string message) : Exception(message);
 
 /// <summary>
 /// Turns pending work items into thumbnail files on disk.
@@ -17,25 +22,38 @@ namespace Tessera.Api.Workers;
 /// thumbnails in the previous system are what that costs.
 /// </para>
 /// <para>
-/// Work is leased rather than claimed: a row is marked running with a deadline,
-/// so a worker that dies mid-job releases it instead of parking it for ever.
+/// Two decoders. Skia handles JPEG, PNG, WebP, GIF, BMP in-process and fast;
+/// it has no HEIF, AVIF or TIFF. On macOS those go through the system's
+/// <c>sips</c> (to a temporary JPEG, then Skia). Elsewhere they are
+/// unsupported, and recorded as such: a failed work item with the reason, a
+/// number on the Library page, never a silent hole.
+/// </para>
+/// <para>
+/// A finished thumbnail queues the embedding, because the embedding worker
+/// reads the thumbnail rather than the original: one decode of the big file.
 /// </para>
 /// </remarks>
 public sealed class ThumbnailWorker(
     Db db,
     WorkItems queue,
-    IServiceProvider services,
+    JobRepository jobs,
     ExclusiveWork exclusive,
     IOptions<StorageOptions> storage,
     ILogger<ThumbnailWorker> log) : BackgroundService
 {
     private static readonly TimeSpan Lease = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan Idle = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan Idle = TimeSpan.FromSeconds(5);
+
+    private long _rendered;
+    private long _renderMs;
+
+    /// <summary>Thumbnails written since start, and the time spent in them, for the README's numbers.</summary>
+    public (long Rendered, long Milliseconds) Rate => (Interlocked.Read(ref _rendered), Interlocked.Read(ref _renderMs));
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         // Let the host finish starting before touching the disk.
-        await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+        await Task.Delay(TimeSpan.FromSeconds(3), stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -63,25 +81,18 @@ public sealed class ThumbnailWorker(
 
     private async Task<int> DrainAsync(CancellationToken ct)
     {
-        // Paused means paused. Checked before leasing, so a pause does not
-        // strand 32 items in 'running' until their lease expires.
-        await using var scope = services.CreateAsyncScope();
-        var jobs = scope.ServiceProvider.GetRequiredService<JobRepository>();
         if (await jobs.IsPausedAsync(JobNames.Thumbnails, ct))
         {
             return 0;
         }
 
-        // Rendering a thumbnail reads the original off the archive disk, which
-        // is the same disk a library scan walks. They do not share it well, so
-        // whichever asks first gets it and the other waits - enforced by a lock
-        // rather than by everyone remembering the rule. And because this loop
-        // would otherwise re-take the disk the instant it let go, it steps
-        // aside when a scan has been refused recently: the scan is the one
-        // that puts new pictures in front of a person.
+        // Rendering reads originals off the library disk, which a scan also
+        // walks. Whichever asks first gets it and the other waits; and because
+        // this loop would otherwise re-take the disk the instant it let go, it
+        // steps aside when a scan has been refused recently.
         if (exclusive.Wanted)
         {
-            await Task.Delay(TimeSpan.FromSeconds(5), ct);
+            await Task.Delay(TimeSpan.FromSeconds(3), ct);
         }
 
         await using var disk = await exclusive.TryTakeArchiveAsync(JobNames.Thumbnails, ct);
@@ -91,15 +102,15 @@ public sealed class ThumbnailWorker(
         }
 
         // Lease a batch proportional to how many will be worked at once, so a
-        // pause or a crash never holds far more items than are actually being
-        // rendered.
-        var readers = await jobs.ConcurrencyAsync(JobNames.Thumbnails, 1, ct);
-        var batch = await queue.LeaseAsync(JobNames.ThumbnailKind, readers * 8, Lease, ct);
+        // crash never holds far more items than are actually being rendered.
+        var readers = await jobs.ConcurrencyAsync(JobNames.Thumbnails, 4, ct);
+        var batch = await queue.LeaseAsync(WorkItems.ThumbnailKind, readers * 8, Lease, ct);
         if (batch.Count == 0)
         {
             return 0;
         }
 
+        var sw = Stopwatch.StartNew();
         await Parallel.ForEachAsync(
             batch,
             new ParallelOptions { MaxDegreeOfParallelism = readers, CancellationToken = ct },
@@ -109,6 +120,13 @@ public sealed class ThumbnailWorker(
             {
                 await RenderAsync(item, token);
                 await queue.CompleteAsync(item.WorkId, null, token);
+                await queue.EnqueueAsync(WorkItems.EmbeddingKind, item.ContentId, token);
+                Interlocked.Increment(ref _rendered);
+            }
+            catch (UnsupportedFormatException ex)
+            {
+                await queue.AbandonAsync(item.WorkId, ex.Message, CancellationToken.None);
+                log.ThumbnailUnsupported(item.ContentId, ex.Message);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -117,6 +135,8 @@ public sealed class ThumbnailWorker(
             }
         });
 
+        Interlocked.Add(ref _renderMs, sw.ElapsedMilliseconds);
+        log.ThumbnailBatch(batch.Count, sw.ElapsedMilliseconds);
         return batch.Count;
     }
 
@@ -124,14 +144,12 @@ public sealed class ThumbnailWorker(
     {
         if (!job.Mime.StartsWith("image/", StringComparison.Ordinal))
         {
-            // Video posters need a frame extractor, which this service does not
-            // own. Recorded as done rather than retried for ever.
-            return;
+            throw new UnsupportedFormatException($"unsupported: {job.Mime} (no frame extractor in this build)");
         }
 
         if (job.Root is null || job.Rel is null)
         {
-            throw new FileNotFoundException("Every copy of the original is gone");
+            throw new UnsupportedFormatException("every copy of the original is gone");
         }
 
         var absPath = PathRules.Canonical($"{job.Root}/{job.Rel}");
@@ -142,113 +160,90 @@ public sealed class ThumbnailWorker(
 
         var opts = storage.Value;
 
-        // One derived file per picture: the grid thumbnail. There is no
-        // intermediate "preview" size by the owner's rule - the viewer shows
-        // the original, and most originals are 1080-1440 px already. A second
-        // size would have cost ~150 GB across the library for nothing.
-        //
-        // Two decoders. Skia handles JPEG, PNG, WebP, GIF, BMP in-process and
-        // fast; it has no HEIF, AVIF or TIFF. Those - and anything Skia
-        // refuses - go to libvips, which reads everything a phone produces.
-        // Same output either way: a 320px WebP and the original's size.
-        if (!NeedsVips(job.Mime))
+        // One derived file per picture: the grid thumbnail. The viewer shows
+        // the original; a second size would cost disk for nothing.
+        if (!NeedsSystemDecoder(job.Mime))
         {
-            using var input = File.OpenRead(absPath);
-            using var codec = SKCodec.Create(input);
-            using var original = codec is null ? null : SKBitmap.Decode(codec);
+            using var original = DecodeWithSkia(absPath);
             if (original is not null)
             {
-                await WriteAsync(job, original, "thumb", opts.ThumbSize, opts, ct);
-                await RecordAsync(job.ContentId, original.Width, original.Height, opts, ct);
+                await WriteAsync(job, original, opts, ct);
+                await RecordSizeAsync(job.ContentId, original.Width, original.Height, ct);
                 return;
             }
         }
 
-        var (ow, oh) = await VipsThumbnailAsync(job, absPath, "thumb", opts, ct);
-        await RecordAsync(job.ContentId, ow, oh, opts, ct);
+        if (!OperatingSystem.IsMacOS())
+        {
+            throw new UnsupportedFormatException(NeedsSystemDecoder(job.Mime)
+                ? $"unsupported: {job.Mime} is not decodable on this platform"
+                : $"undecodable: {job.Mime} could not be read");
+        }
+
+        // macOS: sips reads everything the platform can (HEIC above all),
+        // to a temporary JPEG that Skia then resizes like any other.
+        var tmp = Path.Combine(Path.GetTempPath(), $"tessera-{Hashing.ToHex(job.Sha256)}.jpg");
+        try
+        {
+            await SipsToJpegAsync(absPath, tmp, ct);
+            using var converted = DecodeWithSkia(tmp)
+                ?? throw new UnsupportedFormatException($"undecodable: sips produced nothing readable for {job.Mime}");
+            await WriteAsync(job, converted, opts, ct);
+            await RecordSizeAsync(job.ContentId, converted.Width, converted.Height, ct);
+        }
+        finally
+        {
+            try
+            {
+                File.Delete(tmp);
+            }
+            catch (IOException)
+            {
+            }
+        }
     }
 
-    private static bool NeedsVips(string mime) => mime is
+    private static bool NeedsSystemDecoder(string mime) => mime is
         "image/heic" or "image/heif" or "image/heic-sequence" or "image/heif-sequence" or
-        "image/avif" or "image/tiff" or "image/x-tiff";
+        "image/avif" or "image/tiff" or "image/x-tiff" or "image/jxl" or "image/x-raw";
 
-    /// <summary>
-    /// The libvips path: <c>vips thumbnail</c> writes the WebP straight to a
-    /// temp file, <c>vipsheader</c> reads the sizes. Returns the ORIGINAL's
-    /// width and height.
-    /// </summary>
-    private async Task<(int Width, int Height)> VipsThumbnailAsync(
-        Leased job, string absPath, string kind, StorageOptions opts, CancellationToken ct)
+    private static SKBitmap? DecodeWithSkia(string path)
     {
-        var path = Hashing.DerivedPath(opts.ThumbnailRoot, job.Sha256, kind, "webp");
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var tmp = path + ".tmp.webp";
-
-        // "thumbnail" fits the picture inside a square of the given size, so
-        // the longest edge lands on it - the same rule Skia's path applies -
-        // and never upscales.
-        await RunAsync("vips", ["thumbnail", absPath, $"{tmp}[Q={opts.JpegQuality},strip]",
-                                opts.ThumbSize.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                                "--size", "down"], ct);
-
-        var (ow, oh) = await VipsSizeAsync(absPath, ct);
-        // The thumbnail's size follows from the original's and the rule vips
-        // applied (fit inside the square, never upscale) - no second decode.
-        var scale = Math.Min(1f, (float)opts.ThumbSize / Math.Max(ow, oh));
-        var w = Math.Max(1, (int)Math.Round(ow * scale));
-        var h = Math.Max(1, (int)Math.Round(oh * scale));
-        var size = new FileInfo(tmp).Length;
-
-        File.Move(tmp, path, overwrite: true);
-        await RecordThumbnailAsync(job.ContentId, kind, w, h, size, ct);
-        return (ow, oh);
+        using var input = File.OpenRead(path);
+        using var codec = SKCodec.Create(input);
+        return codec is null ? null : SKBitmap.Decode(codec);
     }
 
-    /// <summary>Width and height from the header, one process, no decode.</summary>
-    private static async Task<(int Width, int Height)> VipsSizeAsync(string file, CancellationToken ct)
+    private static async Task SipsToJpegAsync(string source, string target, CancellationToken ct)
     {
-        // "name: 3024x4032 uchar, 3 bands, srgb, heifload" - the size is the
-        // first token after the colon.
-        var text = await RunAsync("vipsheader", [file], ct);
-        var after = text[(text.LastIndexOf(':') + 1)..].Trim();
-        var dims = after.Split(' ', 2)[0].Split('x');
-        return (int.Parse(dims[0], System.Globalization.CultureInfo.InvariantCulture),
-                int.Parse(dims[1], System.Globalization.CultureInfo.InvariantCulture));
-    }
-
-    private static async Task<string> RunAsync(string exe, string[] args, CancellationToken ct)
-    {
-        var psi = new System.Diagnostics.ProcessStartInfo(exe)
+        var psi = new ProcessStartInfo("sips")
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
         };
-        foreach (var a in args)
+        foreach (var a in new[] { "-s", "format", "jpeg", source, "--out", target })
         {
             psi.ArgumentList.Add(a);
         }
 
-        using var process = System.Diagnostics.Process.Start(psi)
-            ?? throw new InvalidOperationException($"{exe} did not start");
-        var stdout = process.StandardOutput.ReadToEndAsync(ct);
+        using var process = Process.Start(psi)
+            ?? throw new InvalidOperationException("sips did not start");
         var stderr = process.StandardError.ReadToEndAsync(ct);
+        _ = process.StandardOutput.ReadToEndAsync(ct);
         await process.WaitForExitAsync(ct);
         if (process.ExitCode != 0)
         {
             var err = (await stderr).Trim();
-            throw new InvalidOperationException($"{exe} exit {process.ExitCode}: {(err.Length > 200 ? err[..200] : err)}");
+            throw new UnsupportedFormatException($"sips exit {process.ExitCode}: {(err.Length > 200 ? err[..200] : err)}");
         }
-
-        return await stdout;
     }
 
-    private async Task WriteAsync(
-        Leased job, SKBitmap source, string kind, int longest, StorageOptions opts, CancellationToken ct)
+    private async Task WriteAsync(Leased job, SKBitmap source, StorageOptions opts, CancellationToken ct)
     {
-        var scale = (float)longest / Math.Max(source.Width, source.Height);
-        // Never upscale: enlarging a 200px image to 1440 costs disk and looks
-        // worse than the original.
+        var scale = (float)opts.ThumbSize / Math.Max(source.Width, source.Height);
+        // Never upscale: enlarging a 200px image costs disk and looks worse
+        // than the original.
         if (scale > 1f)
         {
             scale = 1f;
@@ -260,9 +255,10 @@ public sealed class ThumbnailWorker(
         using var resized = source.Resize(new SKImageInfo(w, h), SKSamplingOptions.Default)
             ?? throw new InvalidOperationException("Resize failed");
         using var image = SKImage.FromBitmap(resized);
-        using var data = image.Encode(SKEncodedImageFormat.Webp, opts.JpegQuality);
+        using var data = image.Encode(SKEncodedImageFormat.Webp, opts.JpegQuality)
+            ?? throw new InvalidOperationException("WebP encode failed");
 
-        var path = Hashing.DerivedPath(opts.ThumbnailRoot, job.Sha256, kind, "webp");
+        var path = Hashing.DerivedPath(opts.ThumbnailRoot, job.Sha256, "thumb", "webp");
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
         // Write to a temp name and move into place, so a crash mid-write cannot
@@ -274,25 +270,25 @@ public sealed class ThumbnailWorker(
         }
 
         File.Move(tmp, path, overwrite: true);
-        await RecordThumbnailAsync(job.ContentId, kind, w, h, data.Size, ct);
+        await RecordThumbnailAsync(job.ContentId, w, h, data.Size, ct);
     }
 
-    private async Task RecordThumbnailAsync(long contentId, string kind, int w, int h, long size, CancellationToken ct)
+    private async Task RecordThumbnailAsync(long contentId, int w, int h, long size, CancellationToken ct)
     {
         await using var conn = await db.OpenAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
-            """
+            $"""
             INSERT INTO thumbnail (content_id, kind, format, width, height, byte_size)
-            VALUES (@ContentId, @Kind, 'webp', @W, @H, @Size)
+            VALUES (@ContentId, 'thumb', 'webp', @W, @H, @Size)
             ON CONFLICT (content_id, kind) DO UPDATE
-                SET width = EXCLUDED.width, height = EXCLUDED.height,
-                    byte_size = EXCLUDED.byte_size, generated_at = now()
+                SET width = excluded.width, height = excluded.height,
+                    byte_size = excluded.byte_size, generated_at = {Db.NowMs}
             """,
-            new { ContentId = contentId, Kind = kind, W = w, H = h, Size = size },
+            new { ContentId = contentId, W = w, H = h, Size = size },
             cancellationToken: ct));
     }
 
-    private async Task RecordAsync(long contentId, int w, int h, StorageOptions _, CancellationToken ct)
+    private async Task RecordSizeAsync(long contentId, int w, int h, CancellationToken ct)
     {
         await using var conn = await db.OpenAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
@@ -303,4 +299,8 @@ public sealed class ThumbnailWorker(
             new { ContentId = contentId, W = w, H = h },
             cancellationToken: ct));
     }
+
+    /// <summary>For logs: a rate as a number, never "fast".</summary>
+    public static string PerSecond(long count, long ms) =>
+        (ms <= 0 ? 0 : count * 1000.0 / ms).ToString("0.0", CultureInfo.InvariantCulture);
 }

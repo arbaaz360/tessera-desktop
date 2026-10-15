@@ -5,43 +5,36 @@ using Tessera.Data.Repositories;
 namespace Tessera.Api.Workers;
 
 /// <summary>
-/// Notices folders that appear or change under a root, and scans the small
-/// ones itself.
+/// Notices folders that appear or change under a root, and queues them for a scan.
 /// </summary>
 /// <remarks>
 /// <para>
-/// A person copies a folder into their library and expects an album. Immich
-/// walked the whole library on a timer for this; here a root is half a
-/// million files on an archive disk, so the watch never walks. It reads
-/// directory metadata, and as little of it as possible:
+/// A person copies a folder into their library and expects an album. The
+/// watch never walks the library for this; it reads directory metadata, and
+/// as little of it as possible:
 /// </para>
 /// <list type="bullet">
-/// <item><b>One stat per root per tick</b> on the parent folder. NTFS moves a
-/// directory's mtime when a child entry is added, removed or renamed, and
-/// nothing else does - a copied-in folder keeps its own old mtime, but its
-/// parent's moves. When it has, one names-only listing (37 ms for 10,636
-/// entries) says which folders are new.</item>
+/// <item><b>One stat per root per tick</b> on the parent folder. NTFS and
+/// APFS move a directory's mtime when a child entry is added, removed or
+/// renamed, and nothing else does - a copied-in folder keeps its own old
+/// mtime, but its parent's moves. When it has, one names-only listing says
+/// which folders are new.</item>
 /// <item><b>A few hundred child stats per tick</b>, round-robin, for changes
-/// INSIDE folders the watch already knows. Each stat over the bind mount is
-/// 4-8 ms, so all ten thousand at once would be a minute of I/O every tick;
-/// spread out, a change inside an existing folder is noticed within a few
-/// hours, and the album's own index button is the immediate path.</item>
+/// INSIDE folders the watch already knows.</item>
 /// </list>
 /// <para>
 /// A changed folder is scanned once it has <b>settled</b> - its entry count
-/// unchanged across a settle period - and only if it is small enough to
-/// scan unasked (<see cref="WatchOptions.AutoScanMaxEntries"/>). Anything
-/// bigger waits for a person, visibly (<c>/api/scan/folders</c>): the house
-/// rule is that heavy work is queued by tools and started by a human, and a
-/// folder of forty thousand files is heavy. The scan itself makes the album
+/// unchanged across a settle period, so a copy in progress is not hashed
+/// half-written. There is no size above which it waits for a person: the
+/// buyer chose the folder, so the scan starts itself and its progress is on
+/// the Library page. The scan makes the album
 /// (<see cref="FolderRepository.ReconcileAlbumsAsync"/>) and queues the
-/// thumbnails. Faces and vectors are not started from here - they are GPU
-/// work a person starts, from the album page.
+/// thumbnails.
 /// </para>
 /// </remarks>
 public sealed class LibraryWatch(
-    IServiceProvider services,
-    Scanner scanner,
+    FolderRepository folders,
+    ScanRunner scans,
     IOptions<WatchOptions> options,
     ILogger<LibraryWatch> log) : BackgroundService
 {
@@ -52,6 +45,12 @@ public sealed class LibraryWatch(
         AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System | FileAttributes.Hidden,
     };
 
+    /// <summary>When the watch last looked, for the Library page.</summary>
+    public DateTimeOffset? LastTick { get; private set; }
+
+    /// <summary>True while the loop is alive.</summary>
+    public bool Running { get; private set; }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (!options.Value.Enabled)
@@ -59,35 +58,42 @@ public sealed class LibraryWatch(
             return;
         }
 
-        await Task.Delay(TimeSpan.FromSeconds(20), stoppingToken);
-        while (!stoppingToken.IsCancellationRequested)
+        Running = true;
+        try
         {
-            try
+            await Task.Delay(options.Value.InitialDelay, stoppingToken);
+            while (!stoppingToken.IsCancellationRequested)
             {
-                await TickAsync(stoppingToken);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                log.WatchTickFailed(ex);
-            }
+                try
+                {
+                    await TickAsync(stoppingToken);
+                    LastTick = DateTimeOffset.UtcNow;
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    log.WatchTickFailed(ex);
+                }
 
-            await Task.Delay(options.Value.Every, stoppingToken);
+                await Task.Delay(options.Value.Every, stoppingToken);
+            }
+        }
+        finally
+        {
+            Running = false;
         }
     }
 
     private async Task TickAsync(CancellationToken ct)
     {
-        await using var scope = services.CreateAsyncScope();
-        var folders = scope.ServiceProvider.GetRequiredService<FolderRepository>();
         var opts = options.Value;
 
         foreach (var root in await folders.RootsAsync(ct))
         {
-            // A missing mount looks exactly like an empty folder. The scanner
+            // A missing drive looks exactly like an empty folder. The scanner
             // refuses to walk one; the watch refuses to believe one.
             var parentAbs = root.Parent.Length == 0 ? root.AbsPath : PathRules.Canonical($"{root.AbsPath}/{root.Parent}");
             if (!Directory.Exists(root.AbsPath) || !Directory.Exists(parentAbs))
@@ -95,24 +101,15 @@ public sealed class LibraryWatch(
                 continue;
             }
 
-            await NoticeNewFoldersAsync(folders, root, parentAbs, ct);
-            await SweepAsync(folders, root, opts.SweepPerTick, ct);
+            await NoticeNewFoldersAsync(root, parentAbs, ct);
+            await SweepAsync(root, opts.SweepPerTick, ct);
         }
 
-        // The jobs page's "Library scans" pause. Noticing folders is metadata
-        // and always runs; STARTING scans is what a person pauses - the
-        // folders keep collecting on the page until it is resumed.
-        var jobs = scope.ServiceProvider.GetRequiredService<JobRepository>();
-        if (await jobs.IsPausedAsync(JobNames.LibraryScan, ct))
-        {
-            return;
-        }
-
-        await ScanSettledAsync(folders, opts, ct);
+        await ScanSettledAsync(opts, ct);
     }
 
     /// <summary>The parent's mtime moved: list its children by name and record the ones not seen before.</summary>
-    private async Task NoticeNewFoldersAsync(FolderRepository folders, FolderRepository.WatchedRoot root, string parentAbs, CancellationToken ct)
+    private async Task NoticeNewFoldersAsync(FolderRepository.WatchedRoot root, string parentAbs, CancellationToken ct)
     {
         var parentMtime = Mtime(parentAbs);
         var parentRow = await folders.GetAsync(root.RootId, "", ct);
@@ -159,7 +156,7 @@ public sealed class LibraryWatch(
     }
 
     /// <summary>A few hundred stats on folders the watch already knows, least recently looked at first.</summary>
-    private async Task SweepAsync(FolderRepository folders, FolderRepository.WatchedRoot root, int take, CancellationToken ct)
+    private async Task SweepAsync(FolderRepository.WatchedRoot root, int take, CancellationToken ct)
     {
         foreach (var row in await folders.SweepBatchAsync(root.RootId, take, ct))
         {
@@ -183,8 +180,8 @@ public sealed class LibraryWatch(
         }
     }
 
-    /// <summary>Scan the changed folders that have settled and are small enough; leave the rest visible.</summary>
-    private async Task ScanSettledAsync(FolderRepository folders, WatchOptions opts, CancellationToken ct)
+    /// <summary>Queue a scan for every changed folder that has settled.</summary>
+    private async Task ScanSettledAsync(WatchOptions opts, CancellationToken ct)
     {
         var roots = (await folders.RootsAsync(ct)).ToDictionary(r => r.RootId);
         var started = 0;
@@ -224,45 +221,28 @@ public sealed class LibraryWatch(
                 continue;
             }
 
-            if (entries > opts.AutoScanMaxEntries)
-            {
-                // Waits for a person. Said once, when it becomes ready.
-                if (row.ScannedAt is null || row.ScannedAt < row.ChangedAt)
-                {
-                    log.WatchWaitingForHuman(root.Label, row.Folder, entries, opts.AutoScanMaxEntries);
-                }
-
-                continue;
-            }
-
-            if (started >= opts.MaxScansPerTick || scanner.IsRunning)
+            if (started >= opts.MaxScansPerTick)
             {
                 break;
             }
 
-            try
+            if (await scans.EnqueueAsync(row.RootId, row.Folder, ct) is { } runId)
             {
-                log.WatchScanning(root.Label, row.Folder, entries);
-                await scanner.ScanAsync(row.RootId, row.Folder, ct);
+                log.WatchScanning(root.Label, row.Folder, entries, runId);
                 started++;
-            }
-            catch (InvalidOperationException)
-            {
-                // Another job holds the archive. Next tick.
-                break;
             }
         }
     }
 
     /// <summary>
-    /// A directory's mtime at the precision the database keeps (microseconds).
+    /// A directory's mtime at the precision the database keeps (milliseconds).
     /// Compared against a stored value, so both sides must round the same way
     /// or every folder looks changed every sweep.
     /// </summary>
     private static DateTimeOffset Mtime(string abs)
     {
         var ticks = Directory.GetLastWriteTimeUtc(abs).Ticks;
-        return new DateTimeOffset(ticks - ticks % 10, TimeSpan.Zero);
+        return new DateTimeOffset(ticks - ticks % TimeSpan.TicksPerMillisecond, TimeSpan.Zero);
     }
 
     private static List<string> ChildFolders(string parentAbs, string[] exclude)
@@ -295,22 +275,16 @@ public sealed class LibraryWatch(
 
 public sealed class WatchOptions
 {
-    public const string Section = "Tessera:Watch";
-
     public bool Enabled { get; set; } = true;
 
+    /// <summary>Let the host, the migrations and the first scans settle before looking.</summary>
+    public TimeSpan InitialDelay { get; set; } = TimeSpan.FromSeconds(10);
+
     /// <summary>How often the watch looks. One stat per root plus a few hundred child stats.</summary>
-    public TimeSpan Every { get; set; } = TimeSpan.FromMinutes(2);
+    public TimeSpan Every { get; set; } = TimeSpan.FromMinutes(1);
 
     /// <summary>How long a changed folder's entry count must hold still before it is scanned.</summary>
-    public TimeSpan Settle { get; set; } = TimeSpan.FromMinutes(2);
-
-    /// <summary>
-    /// The most entries a folder may have and still be scanned unasked. A
-    /// scan hashes every new file; two thousand is minutes on the archive
-    /// disk, forty thousand is an afternoon and a person's decision.
-    /// </summary>
-    public int AutoScanMaxEntries { get; set; } = 2000;
+    public TimeSpan Settle { get; set; } = TimeSpan.FromMinutes(1);
 
     /// <summary>Child folders stat-ed per root per tick, round-robin.</summary>
     public int SweepPerTick { get; set; } = 300;
