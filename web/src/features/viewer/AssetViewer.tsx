@@ -1,36 +1,30 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useNavigate } from '@tanstack/react-router';
 import { assetOriginalUrl, assetThumbnailUrl, assetVideoUrl } from '@/shared/api/client';
-import { Link } from '@tanstack/react-router';
 import type { TimelineAsset } from '@/shared/api/timeline';
 import { Thumbhash } from '@/shared/ui/Thumbhash';
-import { NowPlayingPanel } from '@/features/music/NowPlayingPanel';
 import { ConfirmDialog } from '@/features/selection/ConfirmDialog';
 import { useBulkFavorite, useBulkTrash } from '@/features/selection/api';
 import { INSECURE_CONTEXT_HINT, canCopyImages, copyImageToClipboard } from './copyImage';
 import { InfoPanel } from './InfoPanel';
 
 /**
- * Full-screen asset viewer.
+ * Full-screen viewer.
  *
  * Two details matter more than they look:
  *
  * 1. LAYERED LOADING. We paint the thumbhash, then the small thumbnail we
- *    already have cached from the grid, then the full image. In this deployment
- *    preview generation is disabled, so the "full image" is the ORIGINAL — often
- *    several megabytes off a hard disk. Without the intermediate thumbnail the
- *    viewer would show a blur for a noticeably long second.
+ *    already have cached from the grid, then the original - often several
+ *    megabytes off a disk. Without the intermediate thumbnail the viewer
+ *    would show a blur for a noticeably long second.
  *
- * 2. KEYBOARD FIRST. Arrow keys page, Escape closes, F favorites, Delete
- *    trashes. A photo viewer you have to drive with a mouse is exhausting;
- *    this is the difference between reviewing fifty photos and giving up
- *    after ten.
+ * 2. KEYBOARD FIRST. Arrow keys page, Escape closes, F favourites, Delete
+ *    trashes, I toggles the info panel, M finds more like this. A viewer you
+ *    have to drive with a mouse is exhausting.
  *
- * The actions reuse the SELECTION feature's mutations with a single id — a
- * bulk endpoint with one element is the same endpoint, and duplicating the
- * mutation just to drop the array would mean two invalidation policies to
- * keep in sync.
+ * The actions reuse the SELECTION feature's mutations with a single id - a
+ * bulk endpoint with one element is the same endpoint.
  */
-
 
 export interface AssetViewerProps {
   assets: TimelineAsset[];
@@ -39,21 +33,19 @@ export interface AssetViewerProps {
   onClose: () => void;
 }
 
-const INFO_PANEL_KEY = 'photos-web.viewer.info';
+const INFO_PANEL_KEY = 'tessera.viewer.info';
 
 export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetViewerProps) {
   const asset = assets[index];
-  // Whether the original has arrived. Two sizes exist in this library, the
-  // grid thumbnail and the original; the thumbnail stays up until the
-  // original has decoded (and stays for good if the browser cannot decode
-  // it - HEIC, RAW).
+  const navigate = useNavigate();
+  // Whether the original has arrived. The thumbnail stays up until the
+  // original has decoded (and stays for good if the browser cannot decode it).
   const [fullLoaded, setFullLoaded] = useState(false);
   const [confirmingTrash, setConfirmingTrash] = useState(false);
 
-  // The info panel is OPEN by default (the owner's rule: the file's name,
-  // date and the album it belongs to are what one looks at), and it stays
-  // open across photos on purpose - someone comparing a run of photos should
-  // not reopen it on every arrow key. Closing it is remembered for the tab.
+  // The info panel is OPEN by default - the file's name, where it lives and
+  // the album it belongs to are what one looks at - and it stays open across
+  // pictures. Closing it is remembered for the session.
   const [showInfo, setShowInfoState] = useState(() => {
     try {
       return sessionStorage.getItem(INFO_PANEL_KEY) !== 'closed';
@@ -72,11 +64,9 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
 
   /*
    * `assets` is a SNAPSHOT the grid handed us when the viewer opened, so a
-   * favorite toggled in here would not repaint until the grid refetches and
-   * the viewer reopens. The overrides map is the viewer's own record of what
-   * it changed, consulted before the snapshot — honest optimism, scoped to
-   * this viewer session and discarded on close, by which time invalidation
-   * has told the grid to catch up.
+   * favourite toggled in here would not repaint until the grid refetches. The
+   * overrides map is the viewer's own record of what it changed, consulted
+   * before the snapshot - honest optimism, scoped to this viewer session.
    */
   const [favoriteOverrides, setFavoriteOverrides] = useState<Record<string, boolean>>({});
 
@@ -100,12 +90,22 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
     favorite.mutate(
       { ids: [asset.id], isFavorite: next },
       {
-        // Roll the optimistic flag back if the server said no, so the star
+        // Roll the optimistic flag back if the core said no, so the star
         // never lies about saved state.
         onError: () => setFavoriteOverrides((current) => ({ ...current, [asset.id]: !next })),
       },
     );
   }, [asset, isFavorite, favorite]);
+
+  /**
+   * "More like this": the search page with this picture's vector as the
+   * query. The viewer closes first so the results are not hidden behind it.
+   */
+  const moreLikeThis = useCallback(() => {
+    if (!asset) return;
+    onClose();
+    void navigate({ to: '/search', search: { q: '', albumId: undefined, similar: asset.id } });
+  }, [asset, onClose, navigate]);
 
   const confirmTrash = useCallback(() => {
     if (!asset) return;
@@ -113,9 +113,8 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
       onSuccess: () => {
         setConfirmingTrash(false);
         // The snapshot still contains the trashed asset, so "advance" means
-        // moving the cursor rather than splicing the array — the grid drops
-        // the asset on its own refetch. Last asset trashed: nothing sensible
-        // left to show, so close.
+        // moving the cursor rather than splicing the array - the grid drops
+        // the asset on its own refetch. Last asset trashed: close.
         if (index < assets.length - 1) {
           onIndexChange(index + 1);
         } else if (index > 0) {
@@ -133,8 +132,7 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      // While the trash confirm is up, IT owns the keyboard; paging photos
-      // or closing the viewer underneath a modal question is chaos.
+      // While the trash confirm is up, IT owns the keyboard.
       if (confirmingTrash) return;
 
       switch (event.key) {
@@ -158,6 +156,10 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
         case 'I':
           setShowInfo(!showInfo);
           break;
+        case 'm':
+        case 'M':
+          moreLikeThis();
+          break;
         default:
           break;
       }
@@ -172,7 +174,7 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
       window.removeEventListener('keydown', onKey);
       document.body.style.overflow = previousOverflow;
     };
-  }, [go, onClose, toggleFavorite, confirmingTrash, showInfo]);
+  }, [go, onClose, toggleFavorite, moreLikeThis, confirmingTrash, showInfo]);
 
   // Preload the neighbours so paging feels instant rather than staged.
   useEffect(() => {
@@ -192,7 +194,7 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
       className="fixed inset-0 z-50 flex flex-col bg-black/95 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
-      aria-label="Asset viewer"
+      aria-label="Picture viewer"
     >
       <header className="flex h-14 shrink-0 items-center gap-3 px-4 text-white/80">
         <button
@@ -210,39 +212,38 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
           {index + 1} / {assets.length.toLocaleString()}
         </span>
 
-        <span className="ml-auto text-sm text-white/60">
-          {formatDate(asset.fileCreatedAt)}
-          {asset.city ? ` · ${asset.city}` : ''}
-          {asset.country ? `, ${asset.country}` : ''}
-        </span>
+        <span className="ml-auto text-sm text-white/60">{formatDate(asset.fileCreatedAt)}</span>
 
         <button
           type="button"
           onClick={toggleFavorite}
           className={`rounded-md p-2 hover:bg-white/10 ${isFavorite ? 'text-accent' : 'hover:text-white'}`}
-          aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+          aria-label={isFavorite ? 'Remove from favourites' : 'Add to favourites'}
           aria-pressed={isFavorite}
-          title={`${isFavorite ? 'Unfavorite' : 'Favorite'} (F)`}
+          title={`${isFavorite ? 'Unfavourite' : 'Favourite'} (F)`}
         >
           <svg width="20" height="20" viewBox="0 0 24 24" fill={isFavorite ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round">
             <path d="m12 3 2.7 5.8 6.3.7-4.7 4.3 1.3 6.2L12 16.9 6.4 20l1.3-6.2L3 9.5l6.3-.7Z" />
           </svg>
         </button>
 
-        <Link
-          to="/faces"
-          search={{ assetId: asset.id }}
-          className="rounded-md p-2 hover:bg-white/10 hover:text-white"
-          aria-label="Find this face across the library"
-          title="Find face"
-        >
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-            <circle cx="10" cy="8" r="4" />
-            <path d="M3 20c0-3.5 3-6 7-6 1.2 0 2.3.2 3.2.6" />
-            <circle cx="17.5" cy="16.5" r="3" />
-            <path d="m19.8 18.8 2 2" />
-          </svg>
-        </Link>
+        {asset.isImage && (
+          <button
+            type="button"
+            onClick={moreLikeThis}
+            className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-2 text-sm hover:bg-white/10 hover:text-white"
+            aria-label="Find pictures like this one"
+            title="More like this (M)"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+              <rect x="3" y="3" width="8" height="8" rx="1.5" />
+              <rect x="13" y="3" width="8" height="8" rx="1.5" />
+              <rect x="3" y="13" width="8" height="8" rx="1.5" />
+              <path d="M17 14v6M14 17h6" />
+            </svg>
+            More like this
+          </button>
+        )}
 
         {asset.isImage && <CopyImageButton assetId={asset.id} />}
 
@@ -250,8 +251,8 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
           href={assetOriginalUrl(asset.id)}
           download
           className="rounded-md p-2 hover:bg-white/10 hover:text-white"
-          aria-label="Download original"
-          title="Download original"
+          aria-label="Save a copy of the original"
+          title="Save a copy"
         >
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
             <path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16" />
@@ -263,7 +264,7 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
           onClick={() => setShowInfo(!showInfo)}
           aria-pressed={showInfo}
           className={`rounded-md p-2 hover:bg-white/10 ${showInfo ? 'text-accent' : 'hover:text-white'}`}
-          aria-label={showInfo ? 'Hide photo information' : 'Show photo information'}
+          aria-label={showInfo ? 'Hide picture information' : 'Show picture information'}
           title="Info (I)"
         >
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -286,44 +287,42 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
         </button>
       </header>
 
-      {/* A ROW, so the panel sits beside the photo rather than over it. The
-          inner div keeps its own `relative`, which is what the nav buttons and
-          the music panel position against — they must track the IMAGE, not the
-          image-plus-sidebar. */}
+      {/* A ROW, so the panel sits beside the picture rather than over it. The
+          inner div keeps its own `relative`, which the nav buttons position
+          against - they must track the IMAGE, not the image-plus-sidebar. */}
       <div className="flex min-h-0 flex-1">
         <div className="relative min-h-0 flex-1">
-        {asset.isImage ? (
-          <>
-            {/* Layer 1: the blur we already have, zero network cost. */}
-            {!fullLoaded && (
-              <div className="absolute inset-0 flex items-center justify-center">
-                <Thumbhash hash={asset.thumbhash} className="h-full w-full opacity-60 blur-xl" />
-              </div>
-            )}
+          {asset.isImage ? (
+            <>
+              {/* Layer 1: the blur we already have, zero network cost. */}
+              {!fullLoaded && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <Thumbhash hash={asset.thumbhash} className="h-full w-full opacity-60 blur-xl" />
+                </div>
+              )}
 
-            {/* Layer 2: the grid thumbnail, already cached by the browser. */}
-            {!fullLoaded && (
+              {/* Layer 2: the grid thumbnail, already cached by the browser. */}
+              {!fullLoaded && (
+                <img
+                  src={assetThumbnailUrl(asset.id)}
+                  alt=""
+                  aria-hidden
+                  className="absolute inset-0 h-full w-full object-contain"
+                />
+              )}
+
+              {/* Layer 3: the original. If the browser cannot decode it, the
+                  thumbnail stays. */}
               <img
-                src={assetThumbnailUrl(asset.id)}
+                key={asset.id}
+                src={assetOriginalUrl(asset.id)}
                 alt=""
-                aria-hidden
-                className="absolute inset-0 h-full w-full object-contain"
+                onLoad={() => setFullLoaded(true)}
+                className="absolute inset-0 h-full w-full object-contain transition-opacity duration-300"
+                style={{ opacity: fullLoaded ? 1 : 0 }}
               />
-            )}
-
-            {/* Layer 3: the original. Large, and worth waiting for. If the
-                browser cannot decode it, the thumbnail stays. */}
-            <img
-              key={asset.id}
-              src={assetOriginalUrl(asset.id)}
-              alt=""
-              onLoad={() => setFullLoaded(true)}
-              className="absolute inset-0 h-full w-full object-contain transition-opacity duration-300"
-              style={{ opacity: fullLoaded ? 1 : 0 }}
-            />
-          </>
-        ) : (
-          <>
+            </>
+          ) : (
             <video
               key={asset.id}
               src={assetVideoUrl(asset.id)}
@@ -332,26 +331,17 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
               autoPlay
               className="absolute inset-0 h-full w-full object-contain"
             />
+          )}
 
-            {/* Recognised music for this video. The panel renders null unless
-                it has a match, so mounting it unconditionally is safe — and
-                it floats above the video's native control strip. */}
-            <div className="absolute bottom-20 left-4 z-10">
-              <NowPlayingPanel assetId={asset.id} />
-            </div>
-          </>
-        )}
-
-        <NavButton side="left" onClick={() => go(-1)} disabled={index === 0} />
-        <NavButton side="right" onClick={() => go(1)} disabled={index === assets.length - 1} />
+          <NavButton side="left" onClick={() => go(-1)} disabled={index === 0} />
+          <NavButton side="right" onClick={() => go(1)} disabled={index === assets.length - 1} />
         </div>
 
         {showInfo && (
           <InfoPanel
-            // Keyed by asset so switching photos remounts the panel rather
-            // than showing the previous photo's EXIF while the new request is
-            // in flight — stale metadata beside a different image is worse
-            // than a blank field.
+            // Keyed by asset so switching pictures remounts the panel rather
+            // than showing the previous picture's details while the new
+            // request is in flight.
             key={asset.id}
             assetId={asset.id}
             onNavigate={onClose}
@@ -368,8 +358,8 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
           onConfirm={confirmTrash}
           onCancel={() => setConfirmingTrash(false)}
         >
-          This item will move to the trash. Nothing is deleted permanently — you can restore
-          it from the Trash page.
+          This picture will be hidden in the trash. The file on disk is not touched - you can
+          restore it from the Trash page.
         </ConfirmDialog>
       )}
     </div>
@@ -409,25 +399,16 @@ function formatDate(iso: string): string {
 }
 
 /**
- * Copy the image to the clipboard, replacing the right-click → Copy image
- * dance (and the browser extension that used to paper over it).
- *
- * On an insecure origin the API does not exist at all, so rather than a button
- * that fails on click, this renders a disabled control whose tooltip says how
- * to get a working one. `canCopyImages()` is checked once per mount because
- * the answer cannot change without a navigation.
- *
- * The button reports its own outcome for a moment instead of raising a toast:
- * copying is a small, immediate act, and the feedback belongs where the click
- * happened. Videos never show it — `ClipboardItem` takes an image.
+ * Copy the picture to the clipboard, for pasting into whatever one is
+ * drawing or writing in. The button reports its own outcome for a moment
+ * instead of raising a toast: copying is a small, immediate act, and the
+ * feedback belongs where the click happened.
  */
 function CopyImageButton({ assetId }: { assetId: string }) {
   const [state, setState] = useState<'idle' | 'copying' | 'copied' | 'failed'>('idle');
   const [message, setMessage] = useState<string | null>(null);
   const supported = canCopyImages();
 
-  // Clear the transient result. Keyed on `state` so each result gets its own
-  // full two seconds rather than inheriting a timer already part-elapsed.
   useEffect(() => {
     if (state !== 'copied' && state !== 'failed') return;
     const timer = setTimeout(() => {
@@ -442,7 +423,7 @@ function CopyImageButton({ assetId }: { assetId: string }) {
       <button
         type="button"
         disabled
-        aria-label="Copy image (needs a secure connection)"
+        aria-label="Copy image (needs a secure context)"
         title={INSECURE_CONTEXT_HINT}
         className="cursor-not-allowed rounded-md p-2 opacity-40"
       >
@@ -459,8 +440,6 @@ function CopyImageButton({ assetId }: { assetId: string }) {
         onClick={async () => {
           setState('copying');
           try {
-            // preview: this deployment serves the ORIGINAL for that size, which
-            // is the quality anyone pasting into another app expects.
             await copyImageToClipboard(assetOriginalUrl(assetId));
             setState('copied');
           } catch (error) {

@@ -1,44 +1,27 @@
-import type { AssetOrder, AssetVisibility } from '@immich/sdk';
-import { sessionHeaders } from './client';
+import { apiJson } from './tessera';
+import type { AssetOrder, AssetVisibility, SearchItem } from './types';
 
 /**
- * Timeline endpoints, wrapped by hand.
+ * The timeline endpoints: the bucket index and one month of assets.
  *
- * Everything else calls `@immich/sdk` directly. These two are the exception,
- * for a reason worth understanding because you meet it whenever a generated
- * client lags a server.
- *
- * This deployment adds an `assetType` parameter to the timeline endpoints — a
- * local patch in the forked server. The published SDK is generated from stock
- * Immich and knows nothing about it. Three options:
- *
- *   1. Fork and regenerate the SDK.       Correct, but couples every frontend
- *                                         build to the server monorepo.
- *   2. Cast the SDK call to `any`.        Fast, and discards the type safety
- *                                         that justified the generated client.
- *   3. Wrap the divergent endpoints.      What we do.
- *
- * Small, honest about where local and upstream differ, and deletable the moment
- * upstream catches up.
+ * Every view of the library is the timeline with a filter - the main grid, an
+ * album, the trash, photos-only, oldest-first - so these two calls carry the
+ * whole product's browsing. Their query parameter names are frozen by the
+ * contract (§3); the core answers them unchanged from the fork.
  */
 
-/** Mirrors the server's `AssetType`. Local addition. */
 export type TimelineAssetType = 'IMAGE' | 'VIDEO';
 
 export interface TimeBucketQuery {
   albumId?: string;
-  personId?: string;
-  tagId?: string;
-  userId?: string;
   isFavorite?: boolean;
-  /** `true` lists trashed assets — how the Trash page reuses the timeline. */
+  /** `true` lists trashed assets - how the Trash page reuses the timeline. */
   isTrashed?: boolean;
-  /** 'asc' | 'desc'. Orders the bucket index AND assets within each bucket. */
+  /** Orders the bucket index AND assets within each bucket. */
   order?: AssetOrder;
   visibility?: AssetVisibility;
   withPartners?: boolean;
-  withStacked?: boolean;
-  /** LOCAL PATCH — not present in stock Immich. */
+  /** Photos or videos only. The core filters in SQL, not the browser. */
   assetType?: TimelineAssetType;
 }
 
@@ -49,15 +32,12 @@ export interface TimeBucket {
 }
 
 /**
- * The server returns buckets COLUMNAR — one array per field, all the same
- * length — rather than an array of objects.
+ * The core returns a bucket COLUMNAR - one array per field, all the same
+ * length - rather than an array of objects. For a month of 3,000 pictures
+ * that avoids repeating fourteen key names 3,000 times. `toAssets` transposes
+ * it once at the boundary and the rest of the app never sees this shape.
  *
- * For 3,355 assets that avoids repeating seventeen key names 3,355 times,
- * which is a meaningful saving over the wire. The cost is that it is awkward to
- * consume, so `toAssets` below transposes it once at the boundary and the rest
- * of the app never sees the columnar shape.
- *
- * Fields are optional because Immich only sends columns it has data for.
+ * Fields are optional because the core only sends columns it has data for.
  */
 export interface TimeBucketColumns {
   id: string[];
@@ -70,12 +50,9 @@ export interface TimeBucketColumns {
   fileCreatedAt: string[];
   localOffsetHours?: number[];
   livePhotoVideoId?: (string | null)[];
-  city?: (string | null)[];
-  country?: (string | null)[];
   ownerId?: string[];
   projectionType?: (string | null)[];
   visibility?: string[];
-  status?: string[];
   createdAt?: string[];
 }
 
@@ -84,7 +61,7 @@ export interface TimelineAsset {
   id: string;
   /** width / height. Drives the justified layout without measuring images. */
   ratio: number;
-  /** Base64 thumbhash — a ~28 byte blurred placeholder. */
+  /** Base64 thumbhash - a ~28 byte blurred placeholder. Null until the core makes them. */
   thumbhash: string | null;
   isImage: boolean;
   isFavorite: boolean;
@@ -92,31 +69,25 @@ export interface TimelineAsset {
   durationMs: number | null;
   fileCreatedAt: string;
   livePhotoVideoId: string | null;
-  city: string | null;
-  country: string | null;
 }
 
 /**
- * Adapt a full `AssetResponseDto` to the timeline's lean shape.
+ * Adapt a full asset (`GET /api/assets/{id}`) to the timeline's lean shape.
  *
- * Search results, deep links and any other full-DTO source all funnel through
- * here, so the viewer only ever understands ONE asset shape. The adapter lives
- * at the boundary with the other shape conversions, not inside a component.
+ * Deep links and any other full-asset source funnel through here, so the
+ * viewer only ever understands ONE asset shape.
  */
 export function assetToTimelineAsset(asset: {
   id: string;
   type: string;
   isFavorite: boolean;
   thumbhash?: string | null | undefined;
-  /** v3 sends integer milliseconds; v2.7.5 sent "HH:MM:SS.mmm" strings. */
   duration?: number | string | null | undefined;
   fileCreatedAt: string;
   livePhotoVideoId?: string | null | undefined;
   exifInfo?: {
     exifImageWidth?: number | null | undefined;
     exifImageHeight?: number | null | undefined;
-    city?: string | null | undefined;
-    country?: string | null | undefined;
   } | null | undefined;
 }): TimelineAsset {
   return {
@@ -131,29 +102,32 @@ export function assetToTimelineAsset(asset: {
     durationMs: toDurationMs(asset.duration),
     fileCreatedAt: asset.fileCreatedAt,
     livePhotoVideoId: asset.livePhotoVideoId ?? null,
-    city: asset.exifInfo?.city ?? null,
-    country: asset.exifInfo?.country ?? null,
   };
 }
 
 /**
- * Transpose the columnar payload into objects.
- *
- * Done once per bucket at the API boundary. Doing it lazily per render, or
- * letting the columnar shape leak into components, would trade a clear data
- * model for a saving nobody would notice.
+ * A search hit is one row of the bucket shape as an object (contract §4), so
+ * the grid and the viewer render it like anything else.
  */
+export function searchItemToTimelineAsset(item: SearchItem): TimelineAsset {
+  return {
+    id: item.id,
+    ratio: item.ratio,
+    thumbhash: item.thumbhash ?? null,
+    isImage: item.isImage,
+    isFavorite: item.isFavorite,
+    durationMs: toDurationMs(item.duration),
+    fileCreatedAt: item.fileCreatedAt,
+    livePhotoVideoId: item.livePhotoVideoId ?? null,
+  };
+}
+
 /**
  * Normalise `duration` to milliseconds.
  *
- * The two server versions disagree on the wire type. v2.7.5 sends an
- * "HH:MM:SS.mmm" STRING; v3 sends integer milliseconds. Both are reachable from
- * this app - the dev proxy defaults to v2.7.5 and switches to v3 via IMMICH_URL -
- * so the divergence is resolved here, at the boundary, and everything downstream
- * keeps a number-only contract.
- *
- * Doing it in formatDuration instead would leave `durationMs` lying about its
- * type for every other consumer.
+ * The core sends integer milliseconds. An older server sent "HH:MM:SS.mmm"
+ * strings; the parser stays because it costs nothing and a number-only
+ * contract downstream is worth keeping honest at the boundary.
  */
 export function toDurationMs(value: number | string | null | undefined): number | null {
   if (value === null || value === undefined) return null;
@@ -167,6 +141,7 @@ export function toDurationMs(value: number | string | null | undefined): number 
   return ((Number(hours) * 60 + Number(minutes)) * 60 + Number(seconds)) * 1000 + millis;
 }
 
+/** Transpose the columnar payload into objects, once per bucket. */
 export function toAssets(columns: TimeBucketColumns): TimelineAsset[] {
   const length = columns.id.length;
   const assets: TimelineAsset[] = new Array(length);
@@ -181,15 +156,13 @@ export function toAssets(columns: TimeBucketColumns): TimelineAsset[] {
       durationMs: toDurationMs(columns.duration?.[i]),
       fileCreatedAt: columns.fileCreatedAt[i] ?? '',
       livePhotoVideoId: columns.livePhotoVideoId?.[i] ?? null,
-      city: columns.city?.[i] ?? null,
-      country: columns.country?.[i] ?? null,
     };
   }
 
   return assets;
 }
 
-function toSearchParams(query: object): string {
+export function toSearchParams(query: object): string {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(query)) {
     if (value !== undefined && value !== null && value !== '') {
@@ -199,25 +172,15 @@ function toSearchParams(query: object): string {
   return params.toString();
 }
 
-async function getJson<T>(path: string): Promise<T> {
-  // The active account's token, not just the cookie: see sessionHeaders.
-  const response = await fetch(path, { credentials: 'include', headers: sessionHeaders() });
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText} — ${path}`);
-  }
-  return (await response.json()) as T;
-}
-
 /**
- * Fetch the bucket index — one row per month with a count.
+ * Fetch the bucket index - one row per month with a count.
  *
- * This is what makes a 1.6M-asset timeline tractable. The client learns the
- * shape of the whole library in a single small response, can compute total
- * scroll height immediately, and then fetches only the months actually on
- * screen.
+ * This is what makes a 200,000-picture library tractable: the client learns
+ * the shape of the whole library in a single small response, computes the
+ * total scroll height, and then fetches only the months on screen.
  */
 export function getTimeBuckets(query: TimeBucketQuery = {}): Promise<TimeBucket[]> {
-  return getJson(`/api/timeline/buckets?${toSearchParams(query)}`);
+  return apiJson(`/api/timeline/buckets?${toSearchParams(query)}`);
 }
 
 /** Fetch one month of assets. Called lazily as the user scrolls. */
@@ -225,7 +188,7 @@ export async function getTimeBucket(
   timeBucket: string,
   query: TimeBucketQuery = {},
 ): Promise<TimelineAsset[]> {
-  const columns = await getJson<TimeBucketColumns>(
+  const columns = await apiJson<TimeBucketColumns>(
     `/api/timeline/bucket?${toSearchParams({ ...query, timeBucket })}`,
   );
   return toAssets(columns);

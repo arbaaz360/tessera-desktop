@@ -52,7 +52,7 @@ export function GlobalSearch() {
     event.preventDefault();
     const query = term.trim();
     if (query.length > 1) {
-      void navigate({ to: '/search', search: { q: query, albumId } });
+      void navigate({ to: '/search', search: { q: query, albumId, similar: undefined } });
     }
   }
 
@@ -83,12 +83,12 @@ export function GlobalSearch() {
           <button
             type="button"
             onClick={() => setWidened(true)}
-            title="Search the whole account instead"
+            title="Search the whole library instead"
             className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-1 rounded border border-accent bg-accent-muted px-1.5 py-0.5 text-[11px] font-medium text-ink"
           >
             this album
             <span aria-hidden>×</span>
-            <span className="sr-only">search the whole account instead</span>
+            <span className="sr-only">search the whole library instead</span>
           </button>
         )}
       </div>
