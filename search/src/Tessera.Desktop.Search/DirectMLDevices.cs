@@ -12,12 +12,16 @@ public static class DirectMLDevices
 {
     public sealed record Adapter(int Index, string Name, long DedicatedVideoMemory);
 
-    /// <summary>The first non-software adapter in DXGI order, or null.</summary>
+    /// <summary>
+    /// The hardware adapter with the most dedicated video memory, or null.
+    /// DXGI lists the integrated GPU first on many machines; on this one the
+    /// Intel iGPU came before the RTX 5060 Ti and ran ten times slower.
+    /// </summary>
     [SupportedOSPlatform("windows")]
-    public static Adapter? FirstHardwareAdapter()
+    public static Adapter? BestHardwareAdapter()
     {
         if (!OperatingSystem.IsWindows()) return null;
-        try { return Enumerate().FirstOrDefault(); }
+        try { return Enumerate().OrderByDescending(a => a.DedicatedVideoMemory).ThenBy(a => a.Index).FirstOrDefault(); }
         catch (DllNotFoundException) { return null; }
         catch (EntryPointNotFoundException) { return null; }
         catch (COMException) { return null; }

@@ -146,7 +146,7 @@ public sealed class SiglipEmbedder : IImageEmbedder, IDisposable
         {
             if (OperatingSystem.IsWindows())
             {
-                DirectMLDevices.Adapter? adapter = DirectMLDevices.FirstHardwareAdapter();
+                DirectMLDevices.Adapter? adapter = DirectMLDevices.BestHardwareAdapter();
                 if (adapter is not null)
                 {
                     try

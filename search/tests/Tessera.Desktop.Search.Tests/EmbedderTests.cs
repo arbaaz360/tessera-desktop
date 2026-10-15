@@ -26,7 +26,9 @@ public sealed class ModelFixture : IDisposable
         var sw = Stopwatch.StartNew();
         try
         {
-            var cpuOptions = new SearchOptions { ModelsDir = Path.GetDirectoryName(TestPaths.ModelDir)!, PreferGpu = false };
+            // TESSERA_CPU_THREADS lets a benchmark run try a thread count; 0 is ONNX Runtime's default.
+            int.TryParse(Environment.GetEnvironmentVariable("TESSERA_CPU_THREADS"), out int cpuThreads);
+            var cpuOptions = new SearchOptions { ModelsDir = Path.GetDirectoryName(TestPaths.ModelDir)!, PreferGpu = false, CpuThreads = cpuThreads };
             Cpu = new SiglipEmbedder(cpuOptions, new ModelStore(cpuOptions), null, manifest);
             Cpu.LoadFromDirectory(TestPaths.ModelDir);
             CpuLoadMs = sw.Elapsed.TotalMilliseconds;
@@ -244,7 +246,7 @@ public class EmbedderTests : IClassFixture<ModelFixture>
                 bitmaps.Add(bmp);
             }
 
-            var numbers = new Dictionary<string, object> { ["cpu_threads"] = Environment.ProcessorCount };
+            var numbers = new Dictionary<string, object> { ["cpu_threads"] = Environment.GetEnvironmentVariable("TESSERA_CPU_THREADS") ?? $"default ({Environment.ProcessorCount} cores)" };
             foreach (var (name, model) in new[] { ("cpu", _models.Cpu), ("gpu", _models.Gpu) })
             {
                 if (model is null) continue;
