@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using Dapper;
 using Microsoft.Extensions.Options;
-using SkiaSharp;
 using Tessera.Api.Licence;
 using Tessera.Api.Search;
 using Tessera.Core;
@@ -189,7 +188,7 @@ public sealed class EmbeddingWorker(
             throw new UnsupportedFormatException("no thumbnail to embed from");
         }
 
-        using var bitmap = SKBitmap.Decode(path)
+        using var bitmap = SkiaFiles.Decode(path)
             ?? throw new UnsupportedFormatException("thumbnail could not be decoded");
 
         var vector = embedder.EmbedImage(bitmap);

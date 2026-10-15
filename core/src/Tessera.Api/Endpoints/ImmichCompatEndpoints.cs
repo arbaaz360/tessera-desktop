@@ -474,8 +474,7 @@ public static class ImmichCompatEndpoints
             // and only for pictures that never had them.
             try
             {
-                using var codec = SkiaSharp.SKCodec.Create(abs);
-                if (codec is { Info: { Width: > 0, Height: > 0 } info })
+                if (SkiaFiles.Info(abs) is { Width: > 0, Height: > 0 } info)
                 {
                     await content.RecordDimensionsAsync(cid, info.Width, info.Height, ct);
                 }

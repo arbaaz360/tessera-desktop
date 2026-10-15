@@ -207,12 +207,7 @@ public sealed class ThumbnailWorker(
         "image/heic" or "image/heif" or "image/heic-sequence" or "image/heif-sequence" or
         "image/avif" or "image/tiff" or "image/x-tiff" or "image/jxl" or "image/x-raw";
 
-    private static SKBitmap? DecodeWithSkia(string path)
-    {
-        using var input = File.OpenRead(path);
-        using var codec = SKCodec.Create(input);
-        return codec is null ? null : SKBitmap.Decode(codec);
-    }
+    private static SKBitmap? DecodeWithSkia(string path) => SkiaFiles.Decode(path);
 
     private static async Task SipsToJpegAsync(string source, string target, CancellationToken ct)
     {

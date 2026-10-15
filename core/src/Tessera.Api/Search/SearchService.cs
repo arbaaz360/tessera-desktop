@@ -1,7 +1,6 @@
 using System.Text.Json;
 using Dapper;
 using Microsoft.Extensions.Options;
-using SkiaSharp;
 using Tessera.Core;
 using Tessera.Data;
 using Tessera.Desktop.Search;
@@ -67,7 +66,7 @@ public sealed class SearchService(Db db, IImageEmbedder embedder, IVectorIndex i
             return null;
         }
 
-        using var bitmap = SKBitmap.Decode(path);
+        using var bitmap = SkiaFiles.Decode(path);
         if (bitmap is null)
         {
             return null;
