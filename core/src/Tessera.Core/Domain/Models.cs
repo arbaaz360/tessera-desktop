@@ -34,18 +34,21 @@ public sealed record Location
     public DateTimeOffset? GoneAt { get; init; }
 }
 
+/// <summary>
+/// The one account. Every query is scoped to it, so repository code keeps its
+/// <c>accountId</c> parameters and a second account is a data change, not a
+/// rewrite (CONTRACT §2).
+/// </summary>
 public sealed record Account
 {
+    public const long BuiltInId = 1;
+
     public long AccountId { get; init; }
-    public required string Email { get; init; }
     public required string DisplayName { get; init; }
-    public bool IsAdmin { get; init; }
-    public DateTimeOffset? DisabledAt { get; init; }
+    public DateTimeOffset CreatedAt { get; init; }
 
-    /// <summary>"personal" or "corpus". See migration 0003 for what a corpus is denied.</summary>
-    public string Kind { get; init; } = "personal";
-
-    public bool IsCorpus => Kind == "corpus";
+    /// <summary>The row the schema seeds: id 1.</summary>
+    public static Account BuiltIn { get; } = new() { AccountId = BuiltInId, DisplayName = "Library" };
 }
 
 public sealed record Album
@@ -71,6 +74,12 @@ public sealed record ScanRoot
     public required string AbsPath { get; init; }
     public bool Enabled { get; init; } = true;
     public string[] Exclude { get; init; } = [];
+
+    /// <summary>
+    /// Where this root's album folders sit, relative to the root: "" for the
+    /// root's own children (the default: folders are albums), null for none.
+    /// </summary>
+    public string? AlbumFolder { get; init; } = "";
 }
 
 /// <summary>
@@ -114,14 +123,3 @@ public sealed record TimelineItem
 
 /// <summary>Bytes and counts for one album.</summary>
 public sealed record AlbumStats(long Bytes, long Total, long Images, long Videos);
-
-/// <summary>One of the caller's albums and a same-named album in another personal account.</summary>
-public sealed record AlbumOverlap(
-    string Name,
-    long MyAlbumId, long MyImages, long MyVideos,
-    long OtherAccountId, long OtherAlbumId, long OtherImages, long OtherVideos);
-
-/// <param name="AlbumId">The album that now holds the pictures - the source, or the one it merged into.</param>
-/// <param name="Merged">Whether a same-named album existed in the destination.</param>
-/// <param name="Moved">Memberships that changed hands (a merge counts only those the destination lacked).</param>
-public sealed record AlbumMove(long AlbumId, bool Merged, int Moved);

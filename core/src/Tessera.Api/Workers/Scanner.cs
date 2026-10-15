@@ -1,7 +1,9 @@
 using System.Threading.Channels;
 using Dapper;
 using Microsoft.Extensions.Options;
+using Tessera.Api.Licence;
 using Tessera.Core;
+using Tessera.Core.Domain;
 using Tessera.Data;
 using Tessera.Data.Repositories;
 
@@ -20,29 +22,25 @@ namespace Tessera.Api.Workers;
 /// </para>
 /// <para>
 /// Every run writes a <c>scan_run</c> row with seen / added / moved / gone /
-/// errors, so "nothing happened" and "everything worked" look different. Four
-/// containers in the old system reported healthy for eighteen days while every
-/// run died on startup.
+/// errors, updated every two seconds while it runs, so the Library page shows
+/// a scan moving and "nothing happened" looks different from "everything
+/// worked".
 /// </para>
 /// </remarks>
 public sealed class Scanner(
     Db db,
     ContentRepository content,
     FolderRepository folders,
+    LibraryRepository library,
     ExclusiveWork exclusive,
-    Indexing indexing,
+    FreeTier tier,
     IOptions<ScannerOptions> options,
-    IOptions<RootOptions> roots,
     ILogger<Scanner> log)
 {
     /// <summary>
-    /// What a scan enumerates. Everything Immich accepted and the library
-    /// holds: the common formats, phone RAW (.dng), camera RAW, and the older
-    /// video containers. A file whose extension is not here is invisible to
-    /// the scanner - and therefore must never be marked gone by it either
-    /// (<see cref="ContentRepository.MarkGoneAsync"/> takes this same list):
-    /// 218 .dng files were once declared missing by a scan that had simply
-    /// not looked at them.
+    /// What a scan enumerates. A file whose extension is not here is invisible
+    /// to the scanner - and therefore must never be marked gone by it either
+    /// (<see cref="ContentRepository.MarkGoneAsync"/> takes this same list).
     /// </summary>
     public static readonly IReadOnlyCollection<string> MediaExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
@@ -52,19 +50,28 @@ public sealed class Scanner(
         ".insp", ".insv",
     };
 
+    private static readonly TimeSpan ProgressEvery = TimeSpan.FromSeconds(2);
+
     private int _running;
 
     /// <summary>True while a scan is in flight. One heavy job at a time, by house rule.</summary>
     public bool IsRunning => Volatile.Read(ref _running) == 1;
 
+    /// <summary>The root being walked right now, or null.</summary>
+    public long? RunningRootId { get; private set; }
+
+    /// <summary>Spell a folder the way rel_path is spelled: no slashes at either end, forward slashes.</summary>
+    public static string? NormaliseFolder(string? folder) =>
+        string.IsNullOrWhiteSpace(folder) ? null : folder.Trim('/', '\\').Replace('\\', '/');
+
     /// <param name="folder">
-    /// A folder under the root to walk instead of the whole root - what an
-    /// album sync needs, since one profile's download lands in one folder and
-    /// walking 500,000 files to notice 80 is the wrong shape. Everything about
-    /// the scan is scoped with it: what is known, what is walked, what may be
-    /// marked gone.
+    /// A folder under the root to walk instead of the whole root - what the
+    /// watch asks for when one folder changed, since walking 200,000 files to
+    /// notice 80 is the wrong shape. Everything about the scan is scoped with
+    /// it: what is known, what is walked, what may be marked gone.
     /// </param>
-    public async Task<ScanOutcome> ScanAsync(long rootId, string? folder, CancellationToken ct)
+    /// <param name="runId">A run row opened by the queue, or null to open one here.</param>
+    public async Task<ScanOutcome> ScanAsync(long rootId, string? folder, long? runId, CancellationToken ct)
     {
         // A second concurrent scan would double the disk load and race on the
         // same rows. Refusing is better than queueing silently.
@@ -73,59 +80,59 @@ public sealed class Scanner(
             throw new InvalidOperationException("A scan is already running.");
         }
 
+        RunningRootId = rootId;
         try
         {
-            return await RunAsync(rootId, folder, ct);
+            return await RunAsync(rootId, NormaliseFolder(folder), runId, ct);
         }
         finally
         {
+            RunningRootId = null;
             Volatile.Write(ref _running, 0);
         }
     }
 
-    private async Task<ScanOutcome> RunAsync(long rootId, string? folder, CancellationToken ct)
+    private async Task<ScanOutcome> RunAsync(long rootId, string? folder, long? runId, CancellationToken ct)
     {
         var opts = options.Value;
         var startedAt = DateTimeOffset.UtcNow;
 
-        var root = await LoadRootAsync(rootId, ct)
+        var root = await library.RootAsync(rootId, ct)
             ?? throw new InvalidOperationException($"No scan root {rootId}.");
+        if (!root.Enabled)
+        {
+            throw new InvalidOperationException($"Root {root.Label} is disabled.");
+        }
 
-        // The folder is spelled relative to the root, without slashes at either
-        // end, so it can be compared against rel_path and joined to abs_path.
-        folder = string.IsNullOrWhiteSpace(folder) ? null : folder.Trim('/', '\\').Replace('\\', '/');
         var walkFrom = folder is null ? root.AbsPath : PathRules.Canonical($"{root.AbsPath}/{folder}");
         if (folder is not null && PathRules.RelativeTo(root.AbsPath, walkFrom) is null)
         {
             throw new InvalidOperationException($"{folder} is not under root {root.Label}.");
         }
 
-        // A missing mount looks exactly like an empty folder, and treating one
+        // A missing drive looks exactly like an empty folder, and treating one
         // as the other would mark an entire library gone. Refuse instead.
         if (!Directory.Exists(root.AbsPath) || !Directory.Exists(walkFrom))
         {
             throw new DirectoryNotFoundException(
-                $"Root {root.Label} is not mounted at {root.AbsPath}, or {walkFrom} is absent. Refusing to scan: " +
-                "an unmounted root is indistinguishable from an empty one, and would " +
+                $"Root {root.Label} is not present at {root.AbsPath}, or {walkFrom} is absent. Refusing to scan: " +
+                "an absent root is indistinguishable from an empty one, and would " +
                 "mark every file under it as gone.");
         }
 
-        // One heavy job on the archive at a time. A scan and a thumbnail run
-        // both walk the same disk; together they halve each other rather than
-        // doubling. Held for the whole scan and released by the connection
-        // dying, so a killed process leaves nothing to clear up.
-        // Polls for a short while: the thumbnail worker releases the disk
-        // between batches and steps aside when it sees this scan was refused.
+        // One heavy job on the disk at a time. Polls for a short while: the
+        // thumbnail worker releases the disk between batches and steps aside
+        // when it sees this scan was refused.
         await using var disk = await exclusive.TryTakeArchiveAsync($"scan:{root.Label}", TimeSpan.FromSeconds(20), ct)
             ?? throw new InvalidOperationException(
-                "Another job is reading the archive. Scanning alongside it makes both slower, "
+                "Another job is reading the library disk. Scanning alongside it makes both slower, "
                 + "so this scan was not started. Try again when it finishes.");
 
-        var runId = await StartRunAsync(rootId, ct);
-        log.ScanStarted(runId, root.Label, root.AbsPath);
+        runId ??= await library.CreateRunAsync(rootId, folder, ct);
+        log.ScanStarted(runId.Value, root.Label, walkFrom);
 
         var known = await content.KnownUnderRootAsync(rootId, folder, ct);
-        log.ScanKnown(runId, known.Count);
+        log.ScanKnown(runId.Value, known.Count);
 
         var outcome = new Counters();
         string? firstError = null;
@@ -171,10 +178,27 @@ public sealed class Scanner(
                 {
                     Interlocked.Increment(ref outcome.Errors);
                     Interlocked.CompareExchange(ref firstError, $"{file}: {ex.Message}", null);
-                    log.ScanFileFailed(ex, runId, file);
+                    log.ScanFileFailed(ex, runId.Value, file);
                 }
             }
         }, ct)).ToArray();
+
+        // Progress, visible: the run row is refreshed while the walk goes on.
+        using var progressStop = new CancellationTokenSource();
+        var progress = Task.Run(async () =>
+        {
+            try
+            {
+                while (true)
+                {
+                    await Task.Delay(ProgressEvery, progressStop.Token);
+                    await WriteRunAsync(runId.Value, outcome, gone: 0, error: null, cancelled: false, finished: false, CancellationToken.None);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }, CancellationToken.None);
 
         var cancelled = false;
         try
@@ -185,7 +209,12 @@ public sealed class Scanner(
         catch (OperationCanceledException)
         {
             cancelled = true;
-            log.ScanCancelled(runId);
+            log.ScanCancelled(runId.Value);
+        }
+        finally
+        {
+            await progressStop.CancelAsync();
+            await progress;
         }
 
         long gone = 0;
@@ -194,10 +223,9 @@ public sealed class Scanner(
             // Two conditions, not one. The walk must have COMPLETED - marking
             // rows gone from a partial walk declares live files missing, the
             // single most damaging thing a scanner can do. And the result must
-            // look like a library rather than an accident: Docker creates a
-            // bind-mount source that is missing, so a renamed folder on the
-            // host presents as a root that exists and is empty, which the
-            // Directory.Exists check above cannot tell from a real one.
+            // look like a library rather than an accident: an external drive
+            // that went away between scans can present as a root that exists
+            // and is nearly empty.
             if (ScanSafety.MayMarkGone(known.Count, outcome.Seen))
             {
                 gone = await content.MarkGoneAsync(rootId, startedAt, folder, MediaExtensions, ct);
@@ -205,47 +233,35 @@ public sealed class Scanner(
             else
             {
                 firstError = ScanSafety.Explain(known.Count, outcome.Seen);
-                log.ScanRefusedToMarkGone(runId, known.Count, outcome.Seen);
+                log.ScanRefusedToMarkGone(runId.Value, known.Count, outcome.Seen);
             }
         }
 
-        await FinishRunAsync(runId, outcome, gone, firstError, cancelled, CancellationToken.None);
+        await WriteRunAsync(runId.Value, outcome, gone, firstError, cancelled, finished: true, CancellationToken.None);
 
         if (!cancelled)
         {
             // What the folders now imply: albums named after them, filled;
-            // thumbnails for what is new. Set-based, scoped to what was
-            // walked, and the reason a copied-in folder becomes an album
-            // without anyone asking (docs: LibraryWatch).
+            // thumbnails for what is new, within the free tier's cap.
             var (albums, members) = await folders.ReconcileAlbumsAsync(rootId, folder, CancellationToken.None);
-            var thumbs = await folders.QueueThumbnailsUnderAsync(rootId, folder, CancellationToken.None);
+            var maxId = await tier.MaxContentIdAsync(CancellationToken.None);
+            var thumbs = await folders.QueueThumbnailsUnderAsync(rootId, folder, maxId, CancellationToken.None);
             await folders.ScannedAsync(rootId, folder, CancellationToken.None);
-            log.ScanFolderAlbums(runId, albums, members, thumbs);
-
-            // And the GPU work, QUEUED: faces with FaceSearch, images with
-            // Foundation - for a personal account's folder, in the host's
-            // spelling. Nothing starts here; the jobs page's Run does, once,
-            // for everything queued (Indexing.cs). A whole-root scan is not
-            // queued: it walks half a million files to notice eighty, and the
-            // folder scans that the watch runs already cover what is new.
-            if (outcome.Added > 0 && folder is not null && !await IsCorpusAsync(root.AccountId, CancellationToken.None) &&
-                roots.Value.ToHostPath(PathRules.Canonical($"{root.AbsPath}/{folder}")) is { } hostFolder)
-            {
-                var request = await indexing.RequestFacesAsync(hostFolder, "tessera-scan", CancellationToken.None);
-                var registered = await indexing.RegisterAsync(hostFolder, CancellationToken.None);
-                log.ScanQueuedIndexing(runId, folder, request, registered);
-            }
+            log.ScanFolderAlbums(runId.Value, albums, members, thumbs);
         }
 
-        log.ScanFinished(runId, outcome.Seen, outcome.Added, outcome.Moved,
-                        outcome.Unchanged, gone, outcome.Errors, cancelled);
+        var elapsed = DateTimeOffset.UtcNow - startedAt;
+        log.ScanFinished(runId.Value, outcome.Seen, outcome.Added, outcome.Moved,
+                         outcome.Unchanged, gone, outcome.Errors, cancelled,
+                         (long)elapsed.TotalMilliseconds,
+                         elapsed.TotalSeconds > 0 ? outcome.Seen / elapsed.TotalSeconds : 0);
 
-        return new ScanOutcome(runId, outcome.Seen, outcome.Added, outcome.Moved,
+        return new ScanOutcome(runId.Value, outcome.Seen, outcome.Added, outcome.Moved,
                                outcome.Unchanged, gone, outcome.Errors, cancelled);
     }
 
     private async Task<Reconciled> ProcessAsync(
-        ScanRootRow root, string absPath,
+        ScanRoot root, string absPath,
         Dictionary<string, (long ContentId, long Size, DateTimeOffset? Mtime)> known,
         ScannerOptions opts, CancellationToken ct)
     {
@@ -256,14 +272,13 @@ public sealed class Scanner(
         var mtime = new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero);
 
         // Unchanged size AND timestamp means unchanged bytes, near enough: the
-        // alternative is re-reading 900 GB to learn nothing. A forced rescan
-        // exists for when that assumption needs testing.
+        // alternative is re-reading the whole library to learn nothing.
         if (opts.TrustMtime &&
             known.TryGetValue(rel, out var prev) &&
             prev.Size == info.Length &&
             prev.Mtime is { } m && Math.Abs((m - mtime).TotalSeconds) < 2)
         {
-            await TouchAsync(root.RootId, rel, ct);
+            await content.TouchAsync(root.RootId, rel, DateTimeOffset.UtcNow, ct);
             return Reconciled.Unchanged;
         }
 
@@ -283,23 +298,14 @@ public sealed class Scanner(
         return await content.RecordLocationAsync(contentId, root.AccountId, root.RootId, file, ct);
     }
 
-    private async Task TouchAsync(long rootId, string relPath, CancellationToken ct)
-    {
-        await using var conn = await db.OpenAsync(ct);
-        await conn.ExecuteAsync(new CommandDefinition(
-            "UPDATE location SET last_seen = now() WHERE root_id = @RootId AND rel_path = @RelPath",
-            new { RootId = rootId, RelPath = relPath },
-            cancellationToken: ct));
-    }
-
     private static IEnumerable<string> EnumerateMedia(string root, string[] exclude)
     {
         var options = new EnumerationOptions
         {
             RecurseSubdirectories = true,
             IgnoreInaccessible = true,
-            // A Windows junction becomes a broken symlink inside a container,
-            // and following one can walk in a circle. Never follow them.
+            // Following a junction or symlink can walk in a circle, or out of
+            // the root the person chose. Never follow them.
             AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System,
         };
 
@@ -319,7 +325,7 @@ public sealed class Scanner(
         }
     }
 
-    private static string MimeFor(string path) => Path.GetExtension(path).ToLowerInvariant() switch
+    public static string MimeFor(string path) => Path.GetExtension(path).ToLowerInvariant() switch
     {
         ".jpg" or ".jpeg" => "image/jpeg",
         ".png" => "image/png",
@@ -328,73 +334,42 @@ public sealed class Scanner(
         ".bmp" => "image/bmp",
         ".tif" or ".tiff" => "image/tiff",
         ".heic" or ".heif" => "image/heic",
+        ".avif" => "image/avif",
+        ".jxl" => "image/jxl",
+        ".dng" or ".cr2" or ".cr3" or ".nef" or ".arw" or ".orf" or ".rw2" or ".raf" => "image/x-raw",
         ".mp4" or ".m4v" => "video/mp4",
         ".mov" => "video/quicktime",
         ".webm" => "video/webm",
         ".mkv" => "video/x-matroska",
         ".avi" => "video/x-msvideo",
+        ".wmv" => "video/x-ms-wmv",
+        ".mpg" or ".mpeg" => "video/mpeg",
+        ".3gp" => "video/3gpp",
+        ".mts" or ".m2ts" => "video/mp2t",
+        ".flv" => "video/x-flv",
+        ".vob" or ".insp" or ".insv" => "application/octet-stream",
         _ => "application/octet-stream",
     };
 
-    // Init-property, not positional: Npgsql reports a text[] column's field
-    // type as System.Array, and Dapper then finds no constructor to match. A
-    // settable property takes the string[] value as it is. This is the
-    // reason no scan had ever completed in production before 2026-09-12.
-    private sealed record ScanRootRow
+    private async Task WriteRunAsync(
+        long runId, Counters c, long gone, string? error, bool cancelled, bool finished, CancellationToken ct)
     {
-        public long RootId { get; init; }
-        public long AccountId { get; init; }
-        public string Label { get; init; } = "";
-        public string AbsPath { get; init; } = "";
-        public string[] Exclude { get; init; } = [];
-    }
-
-    private async Task<bool> IsCorpusAsync(long accountId, CancellationToken ct)
-    {
-        await using var conn = await db.OpenAsync(ct);
-        return await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
-            "SELECT kind = 'corpus' FROM account WHERE account_id = @AccountId",
-            new { AccountId = accountId }, cancellationToken: ct));
-    }
-
-    private async Task<ScanRootRow?> LoadRootAsync(long rootId, CancellationToken ct)
-    {
-        await using var conn = await db.OpenAsync(ct);
-        return await conn.QuerySingleOrDefaultAsync<ScanRootRow>(new CommandDefinition(
-            """
-            SELECT root_id AS RootId, account_id AS AccountId, label AS Label,
-                   abs_path AS AbsPath, exclude AS Exclude
-              FROM scan_root WHERE root_id = @RootId AND enabled
-            """,
-            new { RootId = rootId },
-            cancellationToken: ct));
-    }
-
-    private async Task<long> StartRunAsync(long rootId, CancellationToken ct)
-    {
-        await using var conn = await db.OpenAsync(ct);
-        return await conn.ExecuteScalarAsync<long>(new CommandDefinition(
-            "INSERT INTO scan_run (root_id) VALUES (@RootId) RETURNING run_id",
-            new { RootId = rootId },
-            cancellationToken: ct));
-    }
-
-    private async Task FinishRunAsync(
-        long runId, Counters c, long gone, string? error, bool cancelled, CancellationToken ct)
-    {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
-            """
+            $"""
             UPDATE scan_run
-               SET finished_at = now(), files_seen = @Seen, added = @Added, moved = @Moved,
+               SET finished_at = CASE WHEN @Finished THEN {Db.NowMs} END,
+                   files_seen = @Seen, added = @Added, moved = @Moved,
                    unchanged = @Same, marked_gone = @Gone, errors = @Errors,
                    error_sample = @Error, cancelled = @Cancelled
              WHERE run_id = @RunId
             """,
             new
             {
-                RunId = runId, Seen = c.Seen, Added = c.Added, Moved = c.Moved,
-                Same = c.Unchanged, Gone = gone, Errors = c.Errors,
+                RunId = runId, Finished = finished,
+                Seen = Interlocked.Read(ref c.Seen), Added = Interlocked.Read(ref c.Added),
+                Moved = Interlocked.Read(ref c.Moved), Same = Interlocked.Read(ref c.Unchanged),
+                Gone = gone, Errors = Interlocked.Read(ref c.Errors),
                 Error = error, Cancelled = cancelled,
             },
             cancellationToken: ct));

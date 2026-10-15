@@ -2,28 +2,37 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
+    <!-- The executable the shell spawns: tessera-core(.exe). CONTRACT §8. -->
+    <AssemblyName>tessera-core</AssemblyName>
+    <RootNamespace>Tessera.Api</RootNamespace>
+    <Version>1.0.0</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AnalysisLevel>latest-recommended</AnalysisLevel>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <UserSecretsId>tessera</UserSecretsId>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- Not single-file: the native libraries (Skia, e_sqlite3, later ONNX
+         Runtime) sit beside the exe and are signed one by one. CONTRACT §8. -->
+    <PublishSingleFile>false</PublishSingleFile>
+    <!-- For the one P/Invoke (battery state on Windows), source-generated. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Verifies the bcrypt hashes carried over from Immich ($2b$10$...), so
-         existing passwords keep working and no password is ever reset during
-         the migration. -->
-    <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />
-    <!-- Thumbnails. SkiaSharp rather than ImageSharp: MIT, and the native
-         assets package is the supported way to run it in a Linux container. -->
+    <!-- Thumbnails and the model input. The base package carries the native
+         libraries for Windows and macOS. -->
     <PackageReference Include="SkiaSharp" Version="3.119.0" />
-    <PackageReference Include="SkiaSharp.NativeAssets.Linux" Version="3.119.0" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Tessera.Core\Tessera.Core.csproj" />
     <ProjectReference Include="..\Tessera.Data\Tessera.Data.csproj" />
+    <!-- The frozen interface to the search library (CONTRACT §6). Read, never
+         edited from here. The real implementation is registered by the
+         coordinator once it is merged; until then Search/Fake*.cs stand in. -->
+    <ProjectReference Include="..\..\..\search\src\Tessera.Desktop.Search.Abstractions\Tessera.Desktop.Search.Abstractions.csproj" />
   </ItemGroup>
 
 </Project>

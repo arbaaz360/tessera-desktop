@@ -1,6 +1,5 @@
+using System.Text.Json;
 using Dapper;
-using Npgsql;
-using NpgsqlTypes;
 using Tessera.Core.Domain;
 
 namespace Tessera.Data.Repositories;
@@ -33,22 +32,22 @@ public sealed class ContentRepository(Db db)
     /// </remarks>
     public async Task<long> UpsertAsync(ScannedFile f, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteScalarAsync<long>(new CommandDefinition(
             """
             INSERT INTO content (sha256, byte_size, mime, width, height, taken_at, taken_src)
             VALUES (@Sha256, @ByteSize, @Mime, @Width, @Height, @TakenAt, @TakenSrc)
             ON CONFLICT (sha256) DO UPDATE
-                SET taken_at  = COALESCE(content.taken_at, EXCLUDED.taken_at),
-                    taken_src = COALESCE(content.taken_src, EXCLUDED.taken_src),
-                    width     = COALESCE(content.width, EXCLUDED.width),
-                    height    = COALESCE(content.height, EXCLUDED.height)
+                SET taken_at  = COALESCE(content.taken_at, excluded.taken_at),
+                    taken_src = COALESCE(content.taken_src, excluded.taken_src),
+                    width     = COALESCE(content.width, excluded.width),
+                    height    = COALESCE(content.height, excluded.height)
             RETURNING content_id
             """,
             new
             {
                 f.Sha256, f.ByteSize, f.Mime, f.Width, f.Height,
-                TakenAt = f.TakenAt, f.TakenSrc,
+                TakenAt = Db.ToMs(f.TakenAt), f.TakenSrc,
             },
             cancellationToken: ct));
     }
@@ -60,23 +59,24 @@ public sealed class ContentRepository(Db db)
     /// <remarks>
     /// The distinction that matters: a file appearing at a new path whose
     /// content is already known is a MOVE, not an import. Immich treated it as
-    /// a new asset and abandoned the old one's thumbnails, faces and vectors -
+    /// a new asset and abandoned the old one's thumbnails and vectors -
     /// 122,000 of them in one afternoon. Here it updates a row and nothing
     /// downstream is touched.
     /// </remarks>
     public async Task<Reconciled> RecordLocationAsync(
         long contentId, long accountId, long rootId, ScannedFile f, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        var now = DateTimeOffset.UtcNow;
+        await using var conn = await db.OpenWriteAsync(ct);
 
         // Same path, same content: just a heartbeat.
         var updated = await conn.ExecuteAsync(new CommandDefinition(
             """
             UPDATE location
-               SET last_seen = now(), gone_at = NULL, file_mtime = @Mtime
+               SET last_seen = @Now, gone_at = NULL, file_mtime = @Mtime
              WHERE root_id = @RootId AND rel_path = @RelPath AND content_id = @ContentId
             """,
-            new { RootId = rootId, f.RelPath, ContentId = contentId, Mtime = f.FileMtime },
+            new { RootId = rootId, f.RelPath, ContentId = contentId, Mtime = Db.ToMs(f.FileMtime), Now = Db.ToMs(now) },
             cancellationToken: ct));
 
         if (updated > 0)
@@ -86,33 +86,43 @@ public sealed class ContentRepository(Db db)
 
         // The path is known but now holds different bytes (edited or replaced),
         // or the path is new. Either way one row per (root, rel_path).
-        var wasKnownElsewhere = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
+        var wasKnownElsewhere = await conn.ExecuteScalarAsync<long>(new CommandDefinition(
             """
             SELECT EXISTS (SELECT 1 FROM location
                             WHERE content_id = @ContentId AND account_id = @AccountId
                               AND gone_at IS NULL)
             """,
             new { ContentId = contentId, AccountId = accountId },
-            cancellationToken: ct));
+            cancellationToken: ct)) == 1;
 
         await conn.ExecuteAsync(new CommandDefinition(
             """
-            INSERT INTO location (content_id, account_id, root_id, rel_path, file_mtime)
-            VALUES (@ContentId, @AccountId, @RootId, @RelPath, @Mtime)
+            INSERT INTO location (content_id, account_id, root_id, rel_path, file_mtime, first_seen, last_seen)
+            VALUES (@ContentId, @AccountId, @RootId, @RelPath, @Mtime, @Now, @Now)
             ON CONFLICT (root_id, rel_path) DO UPDATE
-                SET content_id = EXCLUDED.content_id,
-                    file_mtime = EXCLUDED.file_mtime,
-                    last_seen  = now(),
+                SET content_id = excluded.content_id,
+                    file_mtime = excluded.file_mtime,
+                    last_seen  = excluded.last_seen,
                     gone_at    = NULL
             """,
             new
             {
                 ContentId = contentId, AccountId = accountId, RootId = rootId,
-                f.RelPath, Mtime = f.FileMtime,
+                f.RelPath, Mtime = Db.ToMs(f.FileMtime), Now = Db.ToMs(now),
             },
             cancellationToken: ct));
 
         return wasKnownElsewhere ? Reconciled.Moved : Reconciled.Added;
+    }
+
+    /// <summary>A file seen again, unchanged: stamp it so the scan does not mark it gone.</summary>
+    public async Task TouchAsync(long rootId, string relPath, DateTimeOffset now, CancellationToken ct)
+    {
+        await using var conn = await db.OpenWriteAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition(
+            "UPDATE location SET last_seen = @Now WHERE root_id = @RootId AND rel_path = @RelPath",
+            new { RootId = rootId, RelPath = relPath, Now = Db.ToMs(now) },
+            cancellationToken: ct));
     }
 
     /// <summary>
@@ -137,15 +147,19 @@ public sealed class ContentRepository(Db db)
         long rootId, DateTimeOffset scanStart, string? folder, IReadOnlyCollection<string> enumerated, CancellationToken ct)
     {
         var exts = enumerated.Select(e => e.TrimStart('.').ToLowerInvariant()).ToArray();
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteAsync(new CommandDefinition(
             """
-            UPDATE location SET gone_at = now()
+            UPDATE location SET gone_at = @Now
              WHERE root_id = @RootId AND gone_at IS NULL AND last_seen < @ScanStart
-               AND (@Folder::text IS NULL OR rel_path LIKE @Folder || '/%')
-               AND lower(regexp_replace(rel_path, '^.*\.', '')) = ANY(@Exts)
+               AND (@Folder IS NULL OR substr(rel_path, 1, length(@Folder) + 1) = @Folder || '/')
+               AND EXISTS (SELECT 1 FROM json_each(@Exts) e WHERE rel_path LIKE '%.' || e.value)
             """,
-            new { RootId = rootId, ScanStart = scanStart, Folder = folder, Exts = exts },
+            new
+            {
+                RootId = rootId, ScanStart = Db.ToMs(scanStart), Now = Db.ToMs(DateTimeOffset.UtcNow),
+                Folder = folder, Exts = JsonSerializer.Serialize(exts),
+            },
             cancellationToken: ct));
     }
 
@@ -154,108 +168,82 @@ public sealed class ContentRepository(Db db)
         KnownUnderRootAsync(long rootId, string? folder, CancellationToken ct)
     {
         await using var conn = await db.OpenAsync(ct);
-        var rows = await conn.QueryAsync<(string RelPath, long ContentId, long Size, DateTimeOffset? Mtime)>(
+        var rows = await conn.QueryAsync<(string RelPath, long ContentId, long Size, long? Mtime)>(
             new CommandDefinition(
                 """
                 SELECT l.rel_path, l.content_id, c.byte_size, l.file_mtime
                   FROM location l JOIN content c ON c.content_id = l.content_id
                  WHERE l.root_id = @RootId AND l.gone_at IS NULL
-                   AND (@Folder::text IS NULL OR l.rel_path LIKE @Folder || '/%')
+                   AND (@Folder IS NULL OR substr(l.rel_path, 1, length(@Folder) + 1) = @Folder || '/')
                 """,
                 new { RootId = rootId, Folder = folder },
                 cancellationToken: ct));
 
         return rows.ToDictionary(
             r => r.RelPath,
-            r => (r.ContentId, r.Size, r.Mtime),
+            r => (r.ContentId, r.Size, Db.FromMs(r.Mtime)),
             StringComparer.Ordinal);
     }
 
     /// <summary>
-    /// Bulk load, for the one-off import. Binary COPY, not a million INSERTs.
+    /// Bulk load. Batched multi-row INSERTs in one transaction - SQLite's
+    /// answer to binary COPY, and well over 100k rows/s.
     /// </summary>
-    public async Task<long> CopyContentAsync(
-        IAsyncEnumerable<ScannedFile> files, CancellationToken ct)
+    /// <returns>Rows offered. Duplicates by hash are ignored, not counted twice.</returns>
+    public async Task<long> BulkInsertAsync(IAsyncEnumerable<ScannedFile> files, CancellationToken ct)
     {
-        await using var conn = await db.Source.OpenConnectionAsync(ct);
+        const int batchSize = 500;
 
-        // Staged into a temp table, then merged, because COPY cannot express
-        // ON CONFLICT and the import re-runs after interruption.
-        await using (var cmd = conn.CreateCommand())
-        {
-            cmd.CommandText =
-                """
-                CREATE TEMP TABLE stage_content (
-                    sha256 bytea, byte_size bigint, mime text,
-                    width int, height int, taken_at timestamptz, taken_src text
-                ) ON COMMIT DROP
-                """;
-            await cmd.ExecuteNonQueryAsync(ct);
-        }
+        await using var conn = await db.OpenWriteAsync(ct);
+        await using var tx = conn.BeginTransaction(deferred: false);
 
         long n = 0;
-        await using (var writer = await conn.BeginBinaryImportAsync(
-            "COPY stage_content (sha256, byte_size, mime, width, height, taken_at, taken_src) FROM STDIN (FORMAT BINARY)",
-            ct))
+        var batch = new List<ScannedFile>(batchSize);
+        await foreach (var f in files.WithCancellation(ct))
         {
-            await foreach (var f in files.WithCancellation(ct))
+            batch.Add(f);
+            if (batch.Count == batchSize)
             {
-                await writer.StartRowAsync(ct);
-                await writer.WriteAsync(f.Sha256, NpgsqlDbType.Bytea, ct);
-                await writer.WriteAsync(f.ByteSize, NpgsqlDbType.Bigint, ct);
-                await writer.WriteAsync(f.Mime, NpgsqlDbType.Text, ct);
-                await WriteNullableIntAsync(writer, f.Width, ct);
-                await WriteNullableIntAsync(writer, f.Height, ct);
-                if (f.TakenAt is { } t)
+                n += await FlushAsync(conn, tx, batch, ct);
+                batch.Clear();
+            }
+        }
+
+        if (batch.Count > 0)
+        {
+            n += await FlushAsync(conn, tx, batch, ct);
+        }
+
+        await tx.CommitAsync(ct);
+        return n;
+
+        static async Task<int> FlushAsync(
+            System.Data.Common.DbConnection conn, System.Data.Common.DbTransaction tx, List<ScannedFile> batch, CancellationToken ct)
+        {
+            var sql = new System.Text.StringBuilder(
+                "INSERT OR IGNORE INTO content (sha256, byte_size, mime, width, height, taken_at, taken_src) VALUES ");
+            var p = new DynamicParameters();
+            for (var i = 0; i < batch.Count; i++)
+            {
+                var f = batch[i];
+                if (i > 0)
                 {
-                    await writer.WriteAsync(t, NpgsqlDbType.TimestampTz, ct);
-                }
-                else
-                {
-                    await writer.WriteNullAsync(ct);
+                    sql.Append(',');
                 }
 
-                if (f.TakenSrc is { } src)
-                {
-                    await writer.WriteAsync(src, NpgsqlDbType.Text, ct);
-                }
-                else
-                {
-                    await writer.WriteNullAsync(ct);
-                }
-
-                n++;
+                sql.Append(System.Globalization.CultureInfo.InvariantCulture,
+                    $"(@s{i},@b{i},@m{i},@w{i},@h{i},@t{i},@src{i})");
+                p.Add($"s{i}", f.Sha256);
+                p.Add($"b{i}", f.ByteSize);
+                p.Add($"m{i}", f.Mime);
+                p.Add($"w{i}", f.Width);
+                p.Add($"h{i}", f.Height);
+                p.Add($"t{i}", Db.ToMs(f.TakenAt));
+                p.Add($"src{i}", f.TakenSrc);
             }
 
-            await writer.CompleteAsync(ct);
-        }
-
-        await using (var merge = conn.CreateCommand())
-        {
-            merge.CommandText =
-                """
-                INSERT INTO content (sha256, byte_size, mime, width, height, taken_at, taken_src)
-                SELECT DISTINCT ON (sha256) sha256, byte_size, mime, width, height, taken_at, taken_src
-                  FROM stage_content
-                 ORDER BY sha256, taken_at NULLS LAST
-                ON CONFLICT (sha256) DO NOTHING
-                """;
-            await merge.ExecuteNonQueryAsync(ct);
-        }
-
-        return n;
-    }
-
-    private static async Task WriteNullableIntAsync(
-        NpgsqlBinaryImporter w, int? value, CancellationToken ct)
-    {
-        if (value is { } v)
-        {
-            await w.WriteAsync(v, NpgsqlDbType.Integer, ct);
-        }
-        else
-        {
-            await w.WriteNullAsync(ct);
+            await conn.ExecuteAsync(new CommandDefinition(sql.ToString(), p, tx, cancellationToken: ct));
+            return batch.Count;
         }
     }
 }
