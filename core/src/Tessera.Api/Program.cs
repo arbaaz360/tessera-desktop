@@ -94,12 +94,10 @@ try
     builder.Services.AddScoped<CurrentUser>();
 
     // -------------------------------------------------------------- search
-    // CONTRACT §6: the core consumes IImageEmbedder and IVectorIndex. Until
-    // the search library is merged, the fake stands in. The coordinator
-    // replaces these two lines with AddTesseraSearch(new SearchOptions {
-    // ModelsDir = env.ModelsDir }) and nothing else changes.
-    builder.Services.AddSingleton<IImageEmbedder, FakeImageEmbedder>();
-    builder.Services.AddSingleton<IVectorIndex>(sp => new InMemoryVectorIndex(sp.GetRequiredService<IImageEmbedder>().Dimensions));
+    // CONTRACT §6: the core consumes IImageEmbedder and IVectorIndex; the
+    // search library provides SigLIP2 on ONNX Runtime and the int8 index.
+    // FakeImageEmbedder and InMemoryVectorIndex stay in the tree for tests.
+    builder.Services.AddTesseraSearch(new SearchOptions { ModelsDir = env.ModelsDir });
 
     builder.Services.AddSingleton<VectorStore>();
     builder.Services.AddSingleton<ModelReadiness>();

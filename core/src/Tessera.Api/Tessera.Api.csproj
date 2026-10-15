@@ -33,6 +33,19 @@
          edited from here. The real implementation is registered by the
          coordinator once it is merged; until then Search/Fake*.cs stand in. -->
     <ProjectReference Include="..\..\..\search\src\Tessera.Desktop.Search.Abstractions\Tessera.Desktop.Search.Abstractions.csproj" />
+    <!-- The real embedder and index (CONTRACT §6). It picks the DirectML
+         ONNX Runtime package on win-x64 and the base package elsewhere, so
+         this project must not reference Microsoft.ML.OnnxRuntime itself. -->
+    <ProjectReference Include="..\..\..\search\src\Tessera.Desktop.Search\Tessera.Desktop.Search.csproj" />
+  </ItemGroup>
+
+  <!-- DirectML.dll is copied by the Microsoft.AI.DirectML package's build
+       targets, which are not transitive: without this reference the
+       published core has onnxruntime.dll but no DirectML.dll, and the GPU
+       path silently falls back to CPU. Same condition as the search
+       library's choice of the DirectML ONNX Runtime package. -->
+  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'win-x64' OR '$(RuntimeIdentifier)' == 'win-arm64' OR ('$(RuntimeIdentifier)' == '' AND $([MSBuild]::IsOSPlatform('Windows')))">
+    <PackageReference Include="Microsoft.AI.DirectML" Version="1.15.4" />
   </ItemGroup>
 
 </Project>
