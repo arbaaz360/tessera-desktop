@@ -1,239 +1,263 @@
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Dapper;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.AspNetCore.WebUtilities;
 using Tessera.Api;
 using Tessera.Api.Auth;
+using Tessera.Api.Boot;
 using Tessera.Api.Endpoints;
+using Tessera.Api.Licence;
+using Tessera.Api.Search;
 using Tessera.Api.Workers;
 using Tessera.Core;
 using Tessera.Data;
 using Tessera.Data.Migrations;
 using Tessera.Data.Repositories;
+using Tessera.Desktop.Search;
 
-var builder = WebApplication.CreateBuilder(args);
-
-// A normaliser that quietly does nothing reads exactly like one that works, so
-// the rules assert themselves before anything else starts. Failing here is far
-// cheaper than filing a corpus into the wrong account for a fortnight.
-PathRules.SelfTest();
-
-// ------------------------------------------------------------------ options
-builder.Services.Configure<TesseraDbOptions>(builder.Configuration.GetSection(TesseraDbOptions.Section));
-builder.Services.Configure<StorageOptions>(builder.Configuration.GetSection(StorageOptions.Section));
-builder.Services.Configure<ScannerOptions>(builder.Configuration.GetSection(ScannerOptions.Section));
-builder.Services.Configure<WatchOptions>(builder.Configuration.GetSection(WatchOptions.Section));
-builder.Services.Configure<UpstreamOptions>(builder.Configuration.GetSection(UpstreamOptions.Section));
-builder.Services.Configure<RootOptions>(builder.Configuration.GetSection(RootOptions.Section));
-
-// ------------------------------------------------------------------ data
-builder.Services.AddSingleton<Db>();
-builder.Services.AddScoped<ContentRepository>();
-builder.Services.AddScoped<TimelineRepository>();
-builder.Services.AddScoped<AlbumRepository>();
-builder.Services.AddScoped<AccountRepository>();
-builder.Services.AddScoped<ViewableContentRepository>();
-builder.Services.AddScoped<JobRepository>();
-builder.Services.AddScoped<MusicRepository>();
-builder.Services.AddScoped<FolderRepository>();
-builder.Services.AddSingleton<WorkItems>();
-builder.Services.AddSingleton<MediaTokens>();
-builder.Services.AddSingleton<ExclusiveWork>();
-builder.Services.AddSingleton<SchemaMigrator>();
-
-// Scoped: it holds the caller's identity and must never leak between requests.
-builder.Services.AddScoped<CurrentUser>();
-
-// Singleton: it enforces "one scan at a time" with an interlocked flag, which
-// only works if there is one of it.
-builder.Services.AddSingleton<Indexing>();
-builder.Services.AddSingleton<Scanner>();
-builder.Services.AddHostedService<ThumbnailWorker>();
-builder.Services.AddHostedService<MusicWorker>();
-builder.Services.AddHostedService<LibraryWatch>();
-builder.Services.AddHostedService<FaceDrain>();
-
-// ------------------------------------------------------------------ upstream
-var upstream = builder.Configuration.GetSection(UpstreamOptions.Section).Get<UpstreamOptions>()
-               ?? new UpstreamOptions();
-
-builder.Services.AddHttpClient("foundation", c =>
-{
-    c.BaseAddress = new Uri(upstream.Foundation.BaseUrl);
-    c.Timeout = upstream.Foundation.Timeout;
-});
-
-builder.Services.AddHttpClient("facesearch", c =>
-{
-    c.BaseAddress = new Uri(upstream.FaceSearch.BaseUrl);
-    c.Timeout = upstream.FaceSearch.Timeout;
-});
-
-builder.Services.AddHttpClient("cover-picker", c =>
-{
-    c.BaseAddress = new Uri(upstream.CoverPicker.BaseUrl);
-    c.Timeout = upstream.CoverPicker.Timeout;
-});
-
-builder.Services.AddHttpClient("music-identifier", c =>
-{
-    c.BaseAddress = new Uri(upstream.MusicIdentifier.BaseUrl);
-    c.Timeout = upstream.MusicIdentifier.Timeout;
-});
-
-// ------------------------------------------------------------------ json
-builder.Services.ConfigureHttpJsonOptions(o =>
-{
-    o.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
-    o.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
-});
-
-// Dapper maps snake_case columns onto PascalCase properties without an alias
-// on every column.
-DefaultTypeMap.MatchNamesWithUnderscores = true;
-
-builder.Services.AddProblemDetails();
-builder.Services.AddHealthChecks();
-
-// The web app is served from another origin during development and through an
-// ingress in production, and it sends the session cookie.
-const string WebCors = "web";
-builder.Services.AddCors(o => o.AddPolicy(WebCors, p => p
-    .SetIsOriginAllowed(_ => true)
-    .AllowAnyHeader()
-    .AllowAnyMethod()
-    .AllowCredentials()));
-
-var app = builder.Build();
-
-// First, so the decision covers error pages and unmatched routes as well as
-// endpoints. What a client is allowed to keep is a property of the service.
-app.UseCachePolicy();
-
-app.UseExceptionHandler();
-app.UseStatusCodePages();
-app.UseCors(WebCors);
-app.UseMiddleware<AuthMiddleware>();
-
-// ------------------------------------------------------------------ health
+// ------------------------------------------------------------------ boot
 //
-// live  = the process is up.
-// ready = the database answers.
-// Kept apart on purpose: a container that is alive but cannot reach its
-// database should stop taking traffic without being killed and restarted into
-// the same wall.
-app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
-
-app.MapGet("/health/ready", async (Db db, CancellationToken ct) =>
+// Everything that can fail before there is a host exits with a code the
+// shell can read (CONTRACT §1): 2 for a bad environment, 3 for a live core
+// already on this data dir. Stdout carries one line, ever: the ready line.
+CoreEnvironment env;
+try
 {
-    try
-    {
-        await using var conn = await db.OpenAsync(ct);
-        await conn.ExecuteScalarAsync<int>(new CommandDefinition("SELECT 1", cancellationToken: ct));
-        return Results.Ok(new { status = "ready" });
-    }
-    catch (Exception ex)
-    {
-        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable,
-                               title: "Database unreachable", detail: ex.Message);
-    }
-});
-
-// queues = how much work each job has, for whoever sizes capacity from it.
-// The VPN allocator (music-id/scripts) reads this every three minutes to
-// decide how many identifier tunnels the music queue deserves; before Tessera
-// it read the same number out of Immich's database directly, which is the
-// coupling this endpoint exists to end. No login: it is telemetry, on the
-// LAN, and there is nothing in a queue depth worth guarding.
-app.MapGet("/health/queues", async (JobRepository jobs, CancellationToken ct) =>
+    env = CoreEnvironment.Read();
+    env.CreateDirectories();
+}
+catch (BootException ex)
 {
-    var states = await jobs.ListAsync(ct);
-    return Results.Ok(states.Select(j => new
+    Fatal(ex.Message);
+    return ex.ExitCode;
+}
+
+if (PidFile.LiveOwner(env.PidFile) is { } other)
+{
+    Fatal($"Another tessera-core (pid {other}) is running on {env.DataDir}; refusing to start twice.");
+    return CoreEnvironment.ExitAlreadyRunning;
+}
+
+PidFile.Write(env.PidFile, Environment.ProcessId);
+
+try
+{
+    // A normaliser that quietly does nothing reads exactly like one that
+    // works, so the rules assert themselves before anything else starts.
+    PathRules.SelfTest();
+
+    var builder = WebApplication.CreateBuilder(new WebApplicationOptions
     {
-        name = j.Name,
-        paused = j.IsPaused,
-        pending = j.Statistics.Waiting,
-        running = j.Statistics.Active,
+        Args = args,
+        ContentRootPath = AppContext.BaseDirectory,
+    });
+
+    // -------------------------------------------------------------- logging
+    builder.Logging.ClearProviders();
+    builder.Logging.AddProvider(new JsonLineLoggerProvider(env.LogsDir));
+    builder.Logging.SetMinimumLevel(LogLevel.Information);
+    builder.Logging.AddFilter("Microsoft", LogLevel.Warning);
+    builder.Logging.AddFilter("System", LogLevel.Warning);
+
+    // -------------------------------------------------------------- kestrel
+    // 127.0.0.1 only, never 0.0.0.0. Port 0 lets the OS choose.
+    builder.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Loopback, env.Port));
+
+    // -------------------------------------------------------------- services
+    builder.Services.AddSingleton(env);
+    builder.Services.AddSingleton<Readiness>();
+    builder.Services.AddSingleton(new Db(env.DbPath));
+    builder.Services.AddSingleton<SchemaMigrator>();
+
+    // Repositories are stateless over Db, so they are singletons and the
+    // workers take them directly: no captive scopes, no service locator.
+    builder.Services.AddSingleton<ContentRepository>();
+    builder.Services.AddSingleton<TimelineRepository>();
+    builder.Services.AddSingleton<AlbumRepository>();
+    builder.Services.AddSingleton<AccountRepository>();
+    builder.Services.AddSingleton<ViewableContentRepository>();
+    builder.Services.AddSingleton<JobRepository>();
+    builder.Services.AddSingleton<FolderRepository>();
+    builder.Services.AddSingleton<SettingsRepository>();
+    builder.Services.AddSingleton<LibraryRepository>();
+    builder.Services.AddSingleton<WorkItems>();
+    builder.Services.AddSingleton<ExclusiveWork>();
+    builder.Services.AddSingleton<FreeTier>();
+
+    builder.Services.Configure<StorageOptions>(o => o.ThumbnailRoot = env.ThumbsDir);
+    builder.Services.Configure<ScannerOptions>(_ => { });
+    builder.Services.Configure<WatchOptions>(_ => { });
+
+    // Scoped: it holds the caller's identity and must never leak between requests.
+    builder.Services.AddScoped<CurrentUser>();
+
+    // -------------------------------------------------------------- search
+    // CONTRACT §6: the core consumes IImageEmbedder and IVectorIndex. Until
+    // the search library is merged, the fake stands in. The coordinator
+    // replaces these two lines with AddTesseraSearch(new SearchOptions {
+    // ModelsDir = env.ModelsDir }) and nothing else changes.
+    builder.Services.AddSingleton<IImageEmbedder, FakeImageEmbedder>();
+    builder.Services.AddSingleton<IVectorIndex>(sp => new InMemoryVectorIndex(sp.GetRequiredService<IImageEmbedder>().Dimensions));
+
+    builder.Services.AddSingleton<VectorStore>();
+    builder.Services.AddSingleton<ModelReadiness>();
+    builder.Services.AddSingleton<PowerSource>();
+    builder.Services.AddSingleton<SearchService>();
+
+    // -------------------------------------------------------------- workers
+    builder.Services.AddSingleton<Scanner>();
+    builder.Services.AddSingleton<ScanRunner>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<ScanRunner>());
+    builder.Services.AddSingleton<LibraryWatch>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<LibraryWatch>());
+    builder.Services.AddSingleton<ThumbnailWorker>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<ThumbnailWorker>());
+    builder.Services.AddSingleton<EmbeddingWorker>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<EmbeddingWorker>());
+
+    // -------------------------------------------------------------- json
+    builder.Services.ConfigureHttpJsonOptions(o =>
+    {
+        o.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+        o.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
+    });
+
+    // -------------------------------------------------------------- cors
+    // One origin: the shell's. Plus Vite's in dev. Credentials are allowed so a
+    // fetch with credentials: 'include' is not refused by the browser.
+    const string WebCors = "web";
+    builder.Services.AddCors(o => o.AddPolicy(WebCors, p => p
+        .WithOrigins(env.AllowedOrigins)
+        .AllowAnyHeader()
+        .AllowAnyMethod()
+        .AllowCredentials()));
+
+    var app = builder.Build();
+    app.Logger.BootStarting(CoreEnvironment.Version, env.DataDir, env.WebOrigin, env.Dev);
+
+    // -------------------------------------------------------------- pipeline
+    // First, so the decision covers error pages and unmatched routes as well
+    // as endpoints. What a client is allowed to keep is a property of the service.
+    app.UseCachePolicy();
+
+    // Errors are a status and {"detail": "…"}, nothing else (CONTRACT §4).
+    app.UseExceptionHandler(h => h.Run(async ctx =>
+    {
+        ctx.Response.StatusCode = StatusCodes.Status500InternalServerError;
+        await ctx.Response.WriteAsJsonAsync(new { detail = "Internal error. See logs/ in the data dir." });
     }));
-});
-
-// -------------------------------------------------------------- migrations
-// Before a single request is served. A build whose schema has not been applied
-// answers queries against a shape it does not expect, and the failure surfaces
-// later as something that reads like a data problem.
-{
-    var applied = await app.Services.GetRequiredService<SchemaMigrator>()
-        .ApplyAsync(CancellationToken.None);
-    foreach (var version in applied)
+    app.UseStatusCodePages(async ctx =>
     {
-        app.Logger.SchemaMigrated(version);
+        var response = ctx.HttpContext.Response;
+        if (!response.HasStarted)
+        {
+            await response.WriteAsJsonAsync(new { detail = ReasonPhrases.GetReasonPhrase(response.StatusCode) });
+        }
+    });
+    app.UseCors(WebCors);
+    app.UseMiddleware<TokenAuthMiddleware>();
+
+    // -------------------------------------------------------------- health
+    // live  = the process is up.
+    // ready = the database is migrated and the workers are running.
+    app.MapGet("/health/live", () => Results.Ok(new
+    {
+        status = "live",
+        pid = Environment.ProcessId,
+        version = CoreEnvironment.Version,
+    }));
+
+    app.MapGet("/health/ready", (Readiness readiness, ScanRunner scans) => readiness.IsReady
+        ? Results.Ok(new
+        {
+            status = "ready",
+            uptimeSeconds = (long)(DateTimeOffset.UtcNow - readiness.StartedAt).TotalSeconds,
+            scansQueued = scans.Queued,
+        })
+        : Api.Fail(StatusCodes.Status503ServiceUnavailable, "starting"));
+
+    // -------------------------------------------------------------- migrations
+    // Before a single request is served. A build whose schema has not been
+    // applied answers queries against a shape it does not expect.
+    {
+        var applied = await app.Services.GetRequiredService<SchemaMigrator>().ApplyAsync(CancellationToken.None);
+        foreach (var version in applied)
+        {
+            app.Logger.SchemaMigrated(version);
+        }
+
+        var interrupted = await app.Services.GetRequiredService<LibraryRepository>().MarkInterruptedRunsAsync(CancellationToken.None);
+        if (interrupted > 0)
+        {
+            app.Logger.InterruptedRuns(interrupted);
+        }
     }
-}
 
-// ------------------------------------------------------------------ routes
-app.MapAuth();
+    // -------------------------------------------------------------- routes
+    app.MapImmichCompat();
+    app.MapMedia();
+    app.MapAlbumOps();
+    app.MapScanning();
+    app.MapLibrary();
+    app.MapSearch();
+    app.MapSettings();
 
-// The web app speaks Immich's contract, so that contract is served here rather
-// than the app being rewritten. Registered AFTER the native routes so a genuine
-// collision fails the build loudly instead of one silently shadowing the other.
-app.MapImmichCompat();
-app.MapMedia();
-app.MapUpstream();
-app.MapAdmin();
-app.MapScanning();
-app.MapQueues();
-app.MapCovers();
-app.MapWorkers();
-app.MapAlbumOps();
-app.MapMusic();
-app.MapFaces();
-app.MapAlbumIndex();
+    // An unmatched /api route is a JSON 404, not an empty body: the caller
+    // parses it and gets a sentence that names the route.
+    app.MapFallback("/api/{**rest}", (HttpContext ctx) => Api.Fail(
+        StatusCodes.Status404NotFound,
+        $"{ctx.Request.Method} {ctx.Request.Path} is not implemented by tessera-core."));
 
-// ----------------------------------------------------------- the web app
-// Serve the built frontend from here, so its requests to /api are
-// same-origin and land on Tessera. Nothing in that project is modified -
-// this reads its build output, and if the folder is absent the API simply
-// runs without a UI.
-var webRoot = Environment.GetEnvironmentVariable("TESSERA_WEB_ROOT") ?? "/web";
-if (Directory.Exists(webRoot) && File.Exists(Path.Combine(webRoot, "index.html")))
-{
-    var files = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(webRoot);
-    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
-    app.UseStaticFiles(new StaticFileOptions
+    // -------------------------------------------------------------- go
+    await app.StartAsync();
+
+    var addresses = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()?.Addresses
+        ?? throw new InvalidOperationException("Kestrel did not report an address.");
+    var port = new Uri(addresses.First()).Port;
+
+    app.Services.GetRequiredService<Readiness>().MarkReady();
+    app.Logger.BootReady(port, Environment.ProcessId);
+
+    // The one line on stdout, ever.
+    Console.Out.WriteLine(JsonSerializer.Serialize(
+        new ReadyLine("ready", port, Environment.ProcessId, CoreEnvironment.Version), ReadyLineContext.Default.ReadyLine));
+    Console.Out.Flush();
+
+    StdinWatch.Start(() =>
     {
-        FileProvider = files,
-        OnPrepareResponse = HttpCaching.ForStaticFile,
+        app.Logger.BootStdinClosed();
+        app.Lifetime.StopApplication();
     });
 
-    // An unmatched /api route must 404 as JSON, and it needs saying because
-    // the default is worse than an error: the SPA fallback below would answer
-    // index.html with a 200, the caller would parse HTML as JSON, and the page
-    // would die somewhere far from the missing endpoint. A more specific
-    // fallback route wins over the catch-all, so this runs first.
-    app.MapFallback("/api/{**rest}", (HttpContext ctx) => Results.Problem(
-        statusCode: StatusCodes.Status404NotFound,
-        title: "No such endpoint",
-        detail: $"{ctx.Request.Method} {ctx.Request.Path} is not implemented by Tessera."));
-
-    // A single-page app owns its own routes, so anything that is not a file
-    // and not an API call has to come back as index.html. The pattern this maps
-    // is {*path:nonfile}, so a request that names a file - a bundle that is no
-    // longer part of this build, say - already 404s rather than being handed a
-    // document to execute as a script. Do not add a route under /assets to say
-    // the same thing: a matched endpoint makes the static file middleware stand
-    // down, and the build's own files stop being served.
-    app.MapFallbackToFile("index.html", new StaticFileOptions
-    {
-        FileProvider = files,
-        OnPrepareResponse = HttpCaching.ForAppShell,
-    });
-    app.Logger.WebAppServed(webRoot);
+    await app.WaitForShutdownAsync();
+    return 0;
 }
-else
+catch (Exception ex)
 {
-    app.Logger.WebAppAbsent(webRoot);
+    Fatal($"tessera-core failed to start: {ex}");
+    return 1;
+}
+finally
+{
+    PidFile.Remove(env.PidFile, Environment.ProcessId);
 }
 
-app.Run();
+static void Fatal(string message) =>
+    Console.Error.WriteLine(JsonSerializer.Serialize(
+        new FatalLine(DateTimeOffset.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture), "fatal", "boot", message),
+        ReadyLineContext.Default.FatalLine));
 
-/// <summary>Exposed so the integration tests can spin the real host.</summary>
+/// <summary>The handshake line: <c>{"event":"ready","port":N,"pid":P,"version":"1.0.0"}</c>.</summary>
+internal sealed record ReadyLine(string Event, int Port, int Pid, string Version);
+
+internal sealed record FatalLine(string Ts, string Level, string Category, string Message);
+
+[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
+[JsonSerializable(typeof(ReadyLine))]
+[JsonSerializable(typeof(FatalLine))]
+internal sealed partial class ReadyLineContext : JsonSerializerContext;
+
+/// <summary>Exposed so the tests can find the executable's assembly.</summary>
 public partial class Program;
