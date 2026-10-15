@@ -38,8 +38,11 @@ export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     throw new ApiError(response.status, await readDetail(response));
   }
-  if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
+  // A 204, a 202 "started" or any other answer without a body is undefined,
+  // not a JSON parse error: the core's accept-and-carry-on routes send none.
+  const text = await response.text();
+  if (text.length === 0) return undefined as T;
+  return JSON.parse(text) as T;
 }
 
 /** The core says why in `detail` (contract §4); older routes said it in `title`. */

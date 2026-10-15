@@ -91,9 +91,15 @@ export function useDuplicates(limit = 200) {
 
 // ------------------------------------------------------------------ search
 
-/** Is the model still arriving or still working through the library? */
+/**
+ * Is there anything to watch? A model that is absent counts: the person is
+ * about to press Download, or the core is about to start one itself, and a
+ * slow poll would show "not downloaded" for a quarter of a minute after
+ * either. Only "ready and every picture embedded" is idle.
+ */
 export function searchIsBusy(status: SearchStatus): boolean {
-  return status.downloading !== null || (status.ready && status.embedded < status.total);
+  if (!status.enabled) return false;
+  return !status.ready || status.downloading !== null || status.embedded < status.total;
 }
 
 export function useSearchStatus(options: { poll?: boolean } = {}) {

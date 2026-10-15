@@ -32,6 +32,7 @@ describe('the client, once configured', () => {
             headers: { 'content-type': 'application/json' },
           });
         }
+        if (url.endsWith('/api/search/model/download')) return new Response('', { status: 202 });
         if (url.includes('/api/search')) {
           return new Response(JSON.stringify({ detail: 'model not ready' }), {
             status: 503,
@@ -98,8 +99,11 @@ describe('the client, once configured', () => {
     expect(isModelNotReady(new Error('other'))).toBe(false);
   });
 
-  it('returns undefined for a 204', async () => {
+  it('returns undefined for a 204, and for a 202 with no body', async () => {
     await expect(apiJson<void>('/api/nothing', { method: 'DELETE' })).resolves.toBeUndefined();
+    // The model download answers 202 and nothing else (contract §4). That is
+    // "started", not a JSON parse error.
+    await expect(apiJson<void>('/api/search/model/download', { method: 'POST' })).resolves.toBeUndefined();
   });
 });
 
