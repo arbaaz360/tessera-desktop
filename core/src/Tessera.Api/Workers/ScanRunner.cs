@@ -95,7 +95,7 @@ public sealed class ScanRunner(Scanner scanner, LibraryRepository library, Db db
     /// <summary>A run that never got to walk still gets a finished row with the reason.</summary>
     private async Task FailRunAsync(long runId, string error, bool cancelled)
     {
-        await using var conn = await db.OpenAsync(CancellationToken.None);
+        await using var conn = await db.OpenWriteAsync(CancellationToken.None);
         await conn.ExecuteAsync(new CommandDefinition(
             $"""
             UPDATE scan_run

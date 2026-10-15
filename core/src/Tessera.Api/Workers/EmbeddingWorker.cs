@@ -196,7 +196,7 @@ public sealed class EmbeddingWorker(
         index.Upsert(item.ContentId, vector);
         store.MarkDirty();
 
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
             $"""
             INSERT INTO embedding (content_id, model, dims, embedded_at)

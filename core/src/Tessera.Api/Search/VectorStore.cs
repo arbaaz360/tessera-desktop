@@ -52,7 +52,7 @@ public sealed class VectorStore(IVectorIndex index, IImageEmbedder embedder, Cor
     /// <summary>Make the ledger agree with the file. Returns how many ledger rows were dropped.</summary>
     public async Task<int> ReconcileAsync(CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         var ledger = (await conn.QueryAsync<long>(new CommandDefinition(
             "SELECT content_id FROM embedding WHERE model = @Model",
             new { Model = embedder.ModelId }, cancellationToken: ct))).ToList();

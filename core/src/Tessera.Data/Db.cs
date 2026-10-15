@@ -18,6 +18,16 @@ namespace Tessera.Data;
 /// opening one per operation is a dictionary lookup, not a file open.
 /// </para>
 /// <para>
+/// ONE WRITER, HELD IN-PROCESS. SQLite allows one writer at a time, and
+/// Microsoft.Data.Sqlite waits for a busy database by sleeping 150 ms and
+/// trying again - so four scanner threads recording files at once did not
+/// queue, they each lost most of a second per write and a 60-file rescan
+/// took five seconds. Every write opens through <see cref="OpenWriteAsync"/>,
+/// which takes a semaphore for the life of the connection; the database
+/// never sees a second writer, readers go through <see cref="OpenAsync"/>
+/// and never wait (WAL). Measured: the same rescan in under half a second.
+/// </para>
+/// <para>
 /// Every timestamp is an INTEGER of Unix milliseconds, UTC. Dapper converts
 /// <see cref="DateTimeOffset"/> both ways through one type handler, and SQL
 /// that needs "now" uses <see cref="NowMs"/>, so there is one clock and one
@@ -30,6 +40,7 @@ public sealed class Db : IDisposable
     public const string NowMs = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
 
     private readonly string _connectionString;
+    private readonly SemaphoreSlim _writer = new(1, 1);
 
     static Db()
     {
@@ -58,12 +69,23 @@ public sealed class Db : IDisposable
             DefaultTimeout = 30,
         }.ToString();
 
-        // Persistent in the file; set once.
+        // Persistent in the file; set once. synchronous is NOT persistent -
+        // it is per connection, and the default (FULL) syncs the WAL on every
+        // commit: measured at 20-30 ms a write on NTFS, 28 files/s for a scan.
+        // So it is set on every connection below.
         using var conn = new SqliteConnection(_connectionString);
         conn.Open();
         conn.Execute("PRAGMA journal_mode=WAL");
-        conn.Execute("PRAGMA synchronous=NORMAL");
     }
+
+    /// <summary>
+    /// Per connection, not per file: foreign keys are off by default in
+    /// SQLite and the schema's ON DELETE CASCADE rules depend on them;
+    /// synchronous=NORMAL under WAL commits without an fsync and loses at
+    /// most the last transactions on power loss, which for an index of
+    /// files that are still on disk is the right trade.
+    /// </summary>
+    private const string PerConnection = "PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;";
 
     public string Path { get; }
 
@@ -73,9 +95,7 @@ public sealed class Db : IDisposable
         try
         {
             await conn.OpenAsync(ct);
-            // Per connection, not per file: foreign keys are off by default in
-            // SQLite and the schema's ON DELETE CASCADE rules depend on them.
-            await conn.ExecuteAsync("PRAGMA foreign_keys=ON");
+            await conn.ExecuteAsync(PerConnection);
             return conn;
         }
         catch
@@ -85,13 +105,53 @@ public sealed class Db : IDisposable
         }
     }
 
+    /// <summary>
+    /// A connection that may write. Only one exists at a time; disposing it
+    /// lets the next writer in. Never open a second one while holding one.
+    /// </summary>
+    public async ValueTask<SqliteConnection> OpenWriteAsync(CancellationToken ct = default)
+    {
+        await _writer.WaitAsync(ct);
+        var conn = new WriteConnection(_connectionString, _writer);
+        try
+        {
+            await conn.OpenAsync(ct);
+            await conn.ExecuteAsync(PerConnection);
+            return conn;
+        }
+        catch
+        {
+            await conn.DisposeAsync();   // releases the gate
+            throw;
+        }
+    }
+
+    /// <summary>The one write connection: holds the writer gate until it is disposed.</summary>
+    private sealed class WriteConnection(string connectionString, SemaphoreSlim gate) : SqliteConnection(connectionString)
+    {
+        private int _released;
+
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (Interlocked.Exchange(ref _released, 1) == 0)
+            {
+                gate.Release();
+            }
+        }
+    }
+
     public static long ToMs(DateTimeOffset t) => t.ToUnixTimeMilliseconds();
     public static long? ToMs(DateTimeOffset? t) => t is { } v ? v.ToUnixTimeMilliseconds() : null;
     public static DateTimeOffset FromMs(long ms) => DateTimeOffset.FromUnixTimeMilliseconds(ms);
     public static DateTimeOffset? FromMs(long? ms) => ms is { } v ? FromMs(v) : null;
 
     /// <summary>Drop the pooled connections, so the file can be deleted (tests) or the process can exit cleanly.</summary>
-    public void Dispose() => SqliteConnection.ClearPool(new SqliteConnection(_connectionString));
+    public void Dispose()
+    {
+        SqliteConnection.ClearPool(new SqliteConnection(_connectionString));
+        _writer.Dispose();
+    }
 }
 
 /// <summary>DateTimeOffset on the way in and out: Unix milliseconds, UTC.</summary>

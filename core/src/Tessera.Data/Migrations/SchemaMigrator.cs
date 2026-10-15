@@ -30,7 +30,7 @@ public sealed class SchemaMigrator(Db db)
     {
         var pending = new List<string>();
 
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
 
         await conn.ExecuteAsync(new CommandDefinition(
             """

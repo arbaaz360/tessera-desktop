@@ -91,7 +91,7 @@ public sealed class FolderRepository(Db db)
     /// <returns>(albums created, memberships added)</returns>
     public async Task<(int Albums, int Members)> ReconcileAlbumsAsync(long rootId, string? folder, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
 
         // The prefix under which album folders live, with its trailing slash,
         // or '' when they are the root's own children. A root with no album
@@ -153,7 +153,7 @@ public sealed class FolderRepository(Db db)
     /// </param>
     public async Task<int> QueueThumbnailsUnderAsync(long rootId, string? folder, long? maxContentId, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO work_item (kind, content_id)
@@ -208,7 +208,7 @@ public sealed class FolderRepository(Db db)
     /// </summary>
     public async Task<int> BootstrapAsync(long rootId, string parent, IEnumerable<string> folders, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await using var tx = conn.BeginTransaction(deferred: false);
         var rows = folders.Select(f => new { RootId = rootId, Folder = Join(parent, f) }).ToList();
         await conn.ExecuteAsync(new CommandDefinition(
@@ -231,7 +231,7 @@ public sealed class FolderRepository(Db db)
     /// <summary>A folder the watch had not seen before: news, to be scanned once it settles.</summary>
     public async Task NoticeAsync(long rootId, string folder, int? entries, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
             $"""
             INSERT INTO scan_folder (root_id, folder, entries, checked_at, changed_at)
@@ -246,7 +246,7 @@ public sealed class FolderRepository(Db db)
     /// <summary>What a stat said. A different mtime than last time is a change.</summary>
     public async Task ObservedAsync(long rootId, string folder, DateTimeOffset mtime, int? entries, bool changed, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
             $"""
             INSERT INTO scan_folder (root_id, folder, mtime, entries, checked_at, changed_at)
@@ -264,7 +264,7 @@ public sealed class FolderRepository(Db db)
     /// <summary>The entry count moved since last look: still being written to. Settle again.</summary>
     public async Task StillChangingAsync(long rootId, string folder, int entries, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
             $"UPDATE scan_folder SET entries = @Entries, checked_at = {Db.NowMs}, changed_at = {Db.NowMs} WHERE root_id = @RootId AND folder = @Folder",
             new { RootId = rootId, Folder = folder, Entries = entries }, cancellationToken: ct));
@@ -276,7 +276,7 @@ public sealed class FolderRepository(Db db)
     /// </summary>
     public async Task ScannedAsync(long rootId, string? folder, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
             $"""
             UPDATE scan_folder SET changed_at = NULL, scanned_at = {Db.NowMs}
@@ -330,7 +330,7 @@ public sealed class FolderRepository(Db db)
 
     public async Task ForgetAsync(long rootId, string folder, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
             "DELETE FROM scan_folder WHERE root_id = @RootId AND folder = @Folder",
             new { RootId = rootId, Folder = folder }, cancellationToken: ct));

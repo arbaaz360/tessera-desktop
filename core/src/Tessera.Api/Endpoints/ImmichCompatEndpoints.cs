@@ -251,7 +251,7 @@ public static class ImmichCompatEndpoints
             BulkIdsBody body, CurrentUser me, Db db, CancellationToken ct) =>
         {
             var ids = Api.ParseIds(body.Ids);
-            await using var conn = await db.OpenAsync(ct);
+            await using var conn = await db.OpenWriteAsync(ct);
             var n = await conn.ExecuteAsync(new CommandDefinition(
                 """
                 UPDATE location SET trashed_at = NULL
@@ -265,7 +265,7 @@ public static class ImmichCompatEndpoints
 
         g.MapPost("/restore", async (CurrentUser me, Db db, CancellationToken ct) =>
         {
-            await using var conn = await db.OpenAsync(ct);
+            await using var conn = await db.OpenWriteAsync(ct);
             var n = await conn.ExecuteAsync(new CommandDefinition(
                 "UPDATE location SET trashed_at = NULL WHERE account_id = @Account AND trashed_at IS NOT NULL",
                 new { Account = me.AccountIdOrThrow }, cancellationToken: ct));
@@ -333,7 +333,7 @@ public static class ImmichCompatEndpoints
             }
 
             var ids = JsonSerializer.Serialize(Api.ParseIds(body.Ids));
-            await using var conn = await db.OpenAsync(ct);
+            await using var conn = await db.OpenWriteAsync(ct);
             await conn.ExecuteAsync(new CommandDefinition(favorite
                 ? """
                   INSERT INTO favorite (account_id, content_id)
@@ -360,7 +360,7 @@ public static class ImmichCompatEndpoints
             }
 
             var ids = JsonSerializer.Serialize(Api.ParseIds(body.Ids));
-            await using var conn = await db.OpenAsync(ct);
+            await using var conn = await db.OpenWriteAsync(ct);
             await conn.ExecuteAsync(new CommandDefinition(
                 $"""
                 UPDATE location SET trashed_at = {Db.NowMs}

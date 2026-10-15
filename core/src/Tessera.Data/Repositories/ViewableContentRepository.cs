@@ -77,7 +77,7 @@ public sealed class ViewableContentRepository(Db db)
     /// </summary>
     public async Task RecordDimensionsAsync(long contentId, int width, int height, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
             """
             UPDATE content SET width = COALESCE(width, @W), height = COALESCE(height, @H)

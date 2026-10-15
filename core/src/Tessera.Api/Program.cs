@@ -225,11 +225,13 @@ try
         new ReadyLine("ready", port, Environment.ProcessId, CoreEnvironment.Version), ReadyLineContext.Default.ReadyLine));
     Console.Out.Flush();
 
-    StdinWatch.Start(() =>
-    {
-        app.Logger.BootStdinClosed();
-        app.Lifetime.StopApplication();
-    });
+    StdinWatch.Start(
+        onEof: () =>
+        {
+            app.Logger.BootStdinClosed();
+            app.Lifetime.StopApplication();
+        },
+        onUnusable: reason => app.Logger.BootStdinUnusable(reason));
 
     await app.WaitForShutdownAsync();
     return 0;

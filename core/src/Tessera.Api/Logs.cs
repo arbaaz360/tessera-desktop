@@ -25,6 +25,9 @@ internal static partial class Logs
     [LoggerMessage(Level = LogLevel.Information, Message = "stdin closed; shutting down")]
     public static partial void BootStdinClosed(this ILogger logger);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "stdin cannot be read ({Reason}); EOF shutdown is off, the shell's kill-on-exit is the backstop")]
+    public static partial void BootStdinUnusable(this ILogger logger, string reason);
+
     [LoggerMessage(Level = LogLevel.Information, Message = "Applied schema migration {Version}")]
     public static partial void SchemaMigrated(this ILogger logger, string version);
 

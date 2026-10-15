@@ -275,7 +275,7 @@ public sealed class ThumbnailWorker(
 
     private async Task RecordThumbnailAsync(long contentId, int w, int h, long size, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
             $"""
             INSERT INTO thumbnail (content_id, kind, format, width, height, byte_size)
@@ -290,7 +290,7 @@ public sealed class ThumbnailWorker(
 
     private async Task RecordSizeAsync(long contentId, int w, int h, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
             """
             UPDATE content SET width = COALESCE(width, @W), height = COALESCE(height, @H)

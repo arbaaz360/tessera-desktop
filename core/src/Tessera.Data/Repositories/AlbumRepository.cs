@@ -79,7 +79,7 @@ public sealed class AlbumRepository(Db db)
     public async Task<long> EnsureAsync(
         long accountId, string name, string description, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteScalarAsync<long>(new CommandDefinition(
             """
             INSERT INTO album (account_id, name, description)
@@ -93,7 +93,7 @@ public sealed class AlbumRepository(Db db)
 
     public async Task<bool> RenameAsync(long accountId, long albumId, string name, string description, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteAsync(new CommandDefinition(
             $"""
             UPDATE album SET name = @Name, description = @Description, updated_at = {Db.NowMs}
@@ -105,7 +105,7 @@ public sealed class AlbumRepository(Db db)
 
     public async Task<bool> DeleteAsync(long accountId, long albumId, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteAsync(new CommandDefinition(
             "DELETE FROM album WHERE album_id = @AlbumId AND account_id = @AccountId",
             new { AccountId = accountId, AlbumId = albumId },
@@ -128,7 +128,7 @@ public sealed class AlbumRepository(Db db)
             return 0;
         }
 
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO album_item (album_id, content_id)
@@ -173,7 +173,7 @@ public sealed class AlbumRepository(Db db)
     /// </summary>
     public async Task<bool> SetCoverAsync(long accountId, long albumId, long contentId, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteAsync(new CommandDefinition(
             $"""
             UPDATE album
@@ -213,7 +213,7 @@ public sealed class AlbumRepository(Db db)
             return 0;
         }
 
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteAsync(new CommandDefinition(
             """
             DELETE FROM album_item

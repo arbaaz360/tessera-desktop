@@ -103,7 +103,7 @@ public sealed class LibraryRepository(Db db)
 
     public async Task<long> AddRootAsync(long accountId, string canonicalPath, string label, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteScalarAsync<long>(new CommandDefinition(
             """
             INSERT INTO scan_root (account_id, label, abs_path, album_folder)
@@ -120,7 +120,7 @@ public sealed class LibraryRepository(Db db)
     /// </summary>
     public async Task<bool> RemoveRootAsync(long accountId, long rootId, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await using var tx = conn.BeginTransaction(deferred: false);
 
         // Locations are deleted by statement, not by cascade, so the row
@@ -205,7 +205,7 @@ public sealed class LibraryRepository(Db db)
     /// <summary>Open a run row before the scan starts, so the run id exists the moment it is queued.</summary>
     public async Task<long> CreateRunAsync(long rootId, string? folder, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteScalarAsync<long>(new CommandDefinition(
             "INSERT INTO scan_run (root_id, folder) VALUES (@RootId, @Folder) RETURNING run_id",
             new { RootId = rootId, Folder = folder }, cancellationToken: ct));
@@ -244,7 +244,7 @@ public sealed class LibraryRepository(Db db)
     /// </summary>
     public async Task<int> MarkInterruptedRunsAsync(CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteAsync(new CommandDefinition(
             $"""
             UPDATE scan_run SET finished_at = {Db.NowMs}, cancelled = 1,

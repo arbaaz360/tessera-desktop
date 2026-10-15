@@ -32,7 +32,7 @@ public sealed class ContentRepository(Db db)
     /// </remarks>
     public async Task<long> UpsertAsync(ScannedFile f, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteScalarAsync<long>(new CommandDefinition(
             """
             INSERT INTO content (sha256, byte_size, mime, width, height, taken_at, taken_src)
@@ -67,7 +67,7 @@ public sealed class ContentRepository(Db db)
         long contentId, long accountId, long rootId, ScannedFile f, CancellationToken ct)
     {
         var now = DateTimeOffset.UtcNow;
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
 
         // Same path, same content: just a heartbeat.
         var updated = await conn.ExecuteAsync(new CommandDefinition(
@@ -118,7 +118,7 @@ public sealed class ContentRepository(Db db)
     /// <summary>A file seen again, unchanged: stamp it so the scan does not mark it gone.</summary>
     public async Task TouchAsync(long rootId, string relPath, DateTimeOffset now, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
             "UPDATE location SET last_seen = @Now WHERE root_id = @RootId AND rel_path = @RelPath",
             new { RootId = rootId, RelPath = relPath, Now = Db.ToMs(now) },
@@ -147,7 +147,7 @@ public sealed class ContentRepository(Db db)
         long rootId, DateTimeOffset scanStart, string? folder, IReadOnlyCollection<string> enumerated, CancellationToken ct)
     {
         var exts = enumerated.Select(e => e.TrimStart('.').ToLowerInvariant()).ToArray();
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteAsync(new CommandDefinition(
             """
             UPDATE location SET gone_at = @Now
@@ -194,7 +194,7 @@ public sealed class ContentRepository(Db db)
     {
         const int batchSize = 500;
 
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await using var tx = conn.BeginTransaction(deferred: false);
 
         long n = 0;

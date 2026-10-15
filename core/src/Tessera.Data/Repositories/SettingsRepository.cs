@@ -63,7 +63,7 @@ public sealed class SettingsRepository(Db db)
 
     public async Task SetThumbnailConcurrencyAsync(int concurrency, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
             $"UPDATE job_control SET concurrency = @Concurrency, updated_at = {Db.NowMs} WHERE name = @Name",
             new { Name = JobNames.Thumbnails, Concurrency = Math.Clamp(concurrency, 1, 64) }, cancellationToken: ct));
@@ -71,7 +71,7 @@ public sealed class SettingsRepository(Db db)
 
     private async Task SetAsync(string key, string value, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
             $"""
             INSERT INTO setting (key, value) VALUES (@Key, @Value)

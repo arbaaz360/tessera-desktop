@@ -96,7 +96,7 @@ public sealed class JobRepository(Db db)
 
     public async Task<bool> SetPausedAsync(string name, bool paused, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteAsync(new CommandDefinition(
             $"UPDATE job_control SET is_paused = @Paused, updated_at = {Db.NowMs} WHERE name = @Name",
             new { Name = name, Paused = paused }, cancellationToken: ct)) > 0;
@@ -114,7 +114,7 @@ public sealed class JobRepository(Db db)
     /// <summary>Set how many files a job works on at once. Bounded by the CHECK on the column.</summary>
     public async Task<bool> SetConcurrencyAsync(string name, int concurrency, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteAsync(new CommandDefinition(
             $"UPDATE job_control SET concurrency = @Concurrency, updated_at = {Db.NowMs} WHERE name = @Name",
             new { Name = name, Concurrency = concurrency }, cancellationToken: ct)) > 0;
@@ -123,7 +123,7 @@ public sealed class JobRepository(Db db)
     /// <summary>Forget failed work of one kind so it can be queued again.</summary>
     public async Task<int> ClearFailedAsync(string kind, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteAsync(new CommandDefinition(
             "DELETE FROM work_item WHERE kind = @Kind AND state = 'failed'",
             new { Kind = kind }, cancellationToken: ct));
@@ -135,7 +135,7 @@ public sealed class JobRepository(Db db)
     /// </summary>
     public async Task<int> QueueThumbnailsAsync(long? maxContentId, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO work_item (kind, content_id)
@@ -155,7 +155,7 @@ public sealed class JobRepository(Db db)
     /// <summary>Queue an embedding for every content that has a thumbnail, no vector for this model, and is within the cap.</summary>
     public async Task<int> QueueEmbeddingsAsync(string model, long? maxContentId, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO work_item (kind, content_id)

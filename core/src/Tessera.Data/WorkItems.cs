@@ -39,7 +39,7 @@ public sealed class WorkItems(Db db)
     {
         var now = DateTimeOffset.UtcNow;
 
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await using var tx = conn.BeginTransaction(deferred: false);
 
         var claimed = (await conn.QueryAsync<long>(new CommandDefinition(
@@ -90,7 +90,7 @@ public sealed class WorkItems(Db db)
     /// </summary>
     public async Task CompleteAsync(long workId, string? error, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
             $"""
             UPDATE work_item
@@ -112,7 +112,7 @@ public sealed class WorkItems(Db db)
     /// </summary>
     public async Task ReleaseAsync(long workId, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
             """
             UPDATE work_item
@@ -130,7 +130,7 @@ public sealed class WorkItems(Db db)
     /// </summary>
     public async Task AbandonAsync(long workId, string reason, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
             $"""
             UPDATE work_item
@@ -144,7 +144,7 @@ public sealed class WorkItems(Db db)
     /// <summary>Queue one item, unless one is already open or has failed for good.</summary>
     public async Task<bool> EnqueueAsync(string kind, long contentId, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO work_item (kind, content_id)

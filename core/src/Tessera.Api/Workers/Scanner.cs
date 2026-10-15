@@ -354,7 +354,7 @@ public sealed class Scanner(
     private async Task WriteRunAsync(
         long runId, Counters c, long gone, string? error, bool cancelled, bool finished, CancellationToken ct)
     {
-        await using var conn = await db.OpenAsync(ct);
+        await using var conn = await db.OpenWriteAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
             $"""
             UPDATE scan_run
