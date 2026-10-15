@@ -1,0 +1,166 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens.
+ *
+ * Tailwind v4 takes its configuration from CSS rather than a JS file, so this
+ * is the whole design system. Everything downstream composes these — no
+ * component should ever reach for a raw hex value.
+ *
+ * The palette is deliberately quiet. In a photo library the photographs supply
+ * all the colour; chrome that competes with them makes the grid harder to read.
+ * So: near-neutral surfaces, one warm accent used sparingly for interaction,
+ * and semantic colours reserved for state rather than decoration.
+ */
+@theme {
+  /* Surfaces, darkest to lightest. Slightly blue-shifted rather than pure
+     grey — pure grey next to photographs reads as dirty. */
+  --color-ground: #0b0d10;
+  --color-surface: #14171c;
+  --color-raised: #1c2027;
+  --color-overlay: #22262e;
+
+  /* Hairlines. Two weights: one for structure, one for whispers. */
+  --color-line: #272c35;
+  --color-line-soft: #1b1f26;
+
+  /* Text. Four steps is enough; more and hierarchy stops meaning anything. */
+  --color-ink: #eef1f6;
+  --color-ink-muted: #a4adbb;
+  --color-ink-faint: #6b7583;
+  --color-ink-inverse: #0b0d10;
+
+  /* One accent. Warm gold — it reads as "selected" against both a dark grid
+     and the photographs themselves, where a blue or green would disappear
+     into half the library. */
+  --color-accent: #e0a458;
+  --color-accent-hover: #eab471;
+  --color-accent-muted: #3a2c1a;
+
+  /* Semantic state, kept separate from the accent so "selected" and "error"
+     can never be confused. */
+  --color-danger: #e05a5a;
+  --color-success: #5aba7d;
+
+  --radius-sm: 0.375rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 1rem;
+
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', 'JetBrains Mono', monospace;
+
+  /* A single easing shared by every transition, so motion feels like one
+     system rather than a dozen opinions. */
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/*
+ * Light theme.
+ *
+ * Only the tokens are redefined — never component rules. A colour whose sole
+ * definition sits inside a theme block is the classic source of unreadable
+ * UI when the other theme is active.
+ */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --color-ground: #f7f8fa;
+    --color-surface: #ffffff;
+    --color-raised: #f1f3f6;
+    --color-overlay: #ffffff;
+
+    --color-line: #dfe3ea;
+    --color-line-soft: #eef0f4;
+
+    --color-ink: #131720;
+    --color-ink-muted: #565f6e;
+    --color-ink-faint: #8b95a4;
+    --color-ink-inverse: #ffffff;
+
+    --color-accent: #a8681c;
+    --color-accent-hover: #8c5615;
+    --color-accent-muted: #f6ead9;
+
+    --color-danger: #c23a3a;
+    --color-success: #2f7d4f;
+  }
+}
+
+:root[data-theme='light'] {
+  --color-ground: #f7f8fa;
+  --color-surface: #ffffff;
+  --color-raised: #f1f3f6;
+  --color-overlay: #ffffff;
+  --color-line: #dfe3ea;
+  --color-line-soft: #eef0f4;
+  --color-ink: #131720;
+  --color-ink-muted: #565f6e;
+  --color-ink-faint: #8b95a4;
+  --color-ink-inverse: #ffffff;
+  --color-accent: #a8681c;
+  --color-accent-hover: #8c5615;
+  --color-accent-muted: #f6ead9;
+  --color-danger: #c23a3a;
+  --color-success: #2f7d4f;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-ground);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Keyboard focus must always be visible. Removing outlines without
+     replacing them is the most common accessibility regression in an app
+     like this, where the grid is entirely keyboard-navigable. */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+
+  ::selection {
+    background: var(--color-accent);
+    color: var(--color-ink-inverse);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer utilities {
+  /* The scrollbar is chrome; in a photo grid it should recede. */
+  .scrollbar-subtle {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-line) transparent;
+  }
+  .scrollbar-subtle::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  .scrollbar-subtle::-webkit-scrollbar-thumb {
+    background: var(--color-line);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+}

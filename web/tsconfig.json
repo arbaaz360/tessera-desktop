@@ -1,0 +1,36 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "types": ["vite/client"],
+
+    /* Strictness. Every one of these is on deliberately — they are the
+       difference between TypeScript catching your mistakes and TypeScript
+       decorating them. `noUncheckedIndexedAccess` in particular is the one
+       most projects skip and then regret. */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+
+    /* One alias only. Deep relative paths (../../../) are a symptom of a
+       module living in the wrong place; a single root alias keeps imports
+       readable without hiding that signal behind a dozen aliases.
+
+       TypeScript 7 removed `baseUrl`, so paths are relative to this file. */
+    "paths": { "@/*": ["./src/*"] }
+  },
+  "include": ["src"]
+}

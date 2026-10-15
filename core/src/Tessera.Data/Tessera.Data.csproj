@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Dapper over EF Core deliberately. Every query here is either a hot
+         read on a known shape or a bulk write; an ORM's change tracker buys
+         nothing and its generated SQL is the thing you end up fighting. Bulk
+         paths use Npgsql's binary COPY, which no ORM exposes. -->
+    <PackageReference Include="Dapper" Version="2.1.66" />
+    <PackageReference Include="Npgsql" Version="9.0.3" />
+    <PackageReference Include="Microsoft.Extensions.Options" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Tessera.Core\Tessera.Core.csproj" />
+  </ItemGroup>
+
+
+  <ItemGroup>
+    <!-- Migrations travel inside the assembly, so the code and the schema it
+         expects cannot be deployed apart. -->
+    <EmbeddedResource Include="Migrations\*.sql" />
+  </ItemGroup>
+</Project>
