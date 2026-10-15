@@ -22,6 +22,31 @@ public class IndexTests
     private static float Cosine(float[] a, float[] b) => TensorPrimitives.CosineSimilarity(a, b);
 
     [Fact]
+    public void TryGetReturnsTheStoredUnitVectorAndFalseForAbsentIds()
+    {
+        var rng = new Random(3);
+        using var index = new BruteForceVectorIndex(768);
+        Assert.False(index.TryGet(1, out var missing));
+        Assert.Empty(missing);
+
+        var a = RandomUnit(rng, 768);
+        index.Upsert(1, a);
+        Assert.True(index.TryGet(1, out var got));
+        Assert.Equal(768, got.Length);
+        Assert.InRange(TensorPrimitives.Norm(got), 0.999f, 1.001f);
+        Assert.InRange(Cosine(a, got), 0.999f, 1.0001f);   // int8 round trip
+
+        // After a remove that moves the last row into the hole, ids still resolve.
+        index.Upsert(2, RandomUnit(rng, 768));
+        var c = RandomUnit(rng, 768);
+        index.Upsert(3, c);
+        Assert.True(index.Remove(1));
+        Assert.False(index.TryGet(1, out _));
+        Assert.True(index.TryGet(3, out var gotC));
+        Assert.InRange(Cosine(c, gotC), 0.999f, 1.0001f);
+    }
+
+    [Fact]
     public void UpsertRemoveContains()
     {
         var rng = new Random(1);

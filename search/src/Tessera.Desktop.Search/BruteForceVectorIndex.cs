@@ -121,6 +121,31 @@ public sealed class BruteForceVectorIndex : IVectorIndex, IDisposable
         finally { _lock.ExitReadLock(); }
     }
 
+    /// <summary>
+    /// The stored row, dequantised: <c>q[i] × scale</c>, which is the unit
+    /// vector the row reconstructs (the scale is <c>1/|q|</c>). Added at
+    /// integration so "more like this" reads the vector instead of decoding
+    /// and re-embedding the picture.
+    /// </summary>
+    public bool TryGet(long id, out float[] vector)
+    {
+        _lock.EnterReadLock();
+        try
+        {
+            if (!_rowOf.TryGetValue(id, out int row))
+            {
+                vector = Array.Empty<float>();
+                return false;
+            }
+            var q = RowSpan(row);
+            float scale = _scales[row];
+            vector = new float[_dims];
+            for (int i = 0; i < _dims; i++) vector[i] = q[i] * scale;
+            return true;
+        }
+        finally { _lock.ExitReadLock(); }
+    }
+
     /// <summary>Drops every row.</summary>
     public void Clear()
     {

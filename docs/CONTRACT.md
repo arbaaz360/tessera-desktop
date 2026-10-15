@@ -43,6 +43,12 @@ Rules:
   `core.pid` before spawning.
 - `GET /health/live` → 200 as soon as the process is up; `GET /health/ready`
   → 200 once the database is migrated and workers are running. No token.
+- Exit codes: `0` clean stop, `1` any other start failure, `2` bad
+  environment, `3` another live core on the same data dir.
+- CORS: the allowed origin gets methods `GET, POST, PUT, PATCH, DELETE,
+  OPTIONS`, headers `Authorization, Content-Type`, credentials; a preflight
+  answers 204. The webview preflights every request that carries the bearer
+  header.
 
 ## 2. Authentication: web ↔ core
 
@@ -58,6 +64,10 @@ keys are gone. One built-in account (`account_id = 1`) exists in the
 database and every query is scoped to it, so repository code keeps its
 `accountId` parameters.
 
+Ids on the wire are decimal strings (`"123"`), for content, albums and
+`ownerId` (`"1"`) alike; the web treats them as opaque. `/api/assets/{id}`
+also accepts a 64-hex sha256.
+
 ## 3. Routes the web app already calls: unchanged
 
 The calls the web app makes today keep their **path, verb, query parameter
@@ -67,10 +77,13 @@ names and JSON shapes**. Neither side renames one. They are, from
 | Kept | Used by |
 |---|---|
 | `/api/timeline/buckets`, `/api/timeline/bucket`, `/api/timeline` | grid |
-| `/api/assets/{id}`, `/api/assets/{id}/thumbnail`, `/api/assets/{id}/original`, favourites and trash operations on assets | viewer, selection, trash |
-| `/api/albums`, `/api/albums/{id}`, `/api/albums/{id}/assets`, `/api/albums/overlap` | albums |
-| `/api/search` with the query parameter names in `web/src/features/search/api.ts` | search — the core now answers it locally (§4) |
-| `/api/scan/roots/{id}/scan`, `/api/scan/folders` | Library page |
+| `/api/assets/{id}`, `/api/assets/{id}/thumbnail`, `/api/assets/{id}/original` (honours `Range`; videos play from it), `PUT /api/assets` (favourite), `DELETE /api/assets` (trash, JSON body), `/api/trash/restore`, `/api/trash/restore/assets` | viewer, selection, trash |
+| `/api/albums`, `/api/albums?assetId=`, `/api/albums/{id}` (`PATCH` honours `albumName`, `description` and `albumThumbnailAssetId`, the cover), `/api/albums/{id}/assets`, `/api/albums/overlap` | albums |
+| `/api/search` with `q`, `albumId`, `mode`, `type`, `takenAfter`, `takenBefore`, `limit` | search — the core answers it locally (§4) |
+| `/api/scan/roots/{id}/scan`, `/api/scan/folders` (`waitingForYou` is always false; `autoScanMaxEntries` is gone) | Library page |
+
+The web no longer calls `/api/albums/{id}/stats`, `/api/download/archive`
+or `/api/assets/{id}/video/playback`; the core may keep or drop them.
 
 Dropped — the core answers 404 and the web app stops calling them:
 `/api/auth/*`, `/api/users*`, `/api/server/config`, `/api/admin/*`,
@@ -113,9 +126,9 @@ All JSON. Errors are an HTTP status plus `{"detail": "…"}`. Times are ISO
 
 | Route | Answer |
 |---|---|
-| `GET /api/search?…` | the query parameter names the web app uses today, plus `limit` (default 100, max 500). Answer: `{"items": [TimelineItem + "score": 0.31], "model": "…"}` where `TimelineItem` is exactly the asset shape `/api/timeline/bucket` returns, so the grid renders it unchanged. `503 {"detail":"model not ready"}` until the model is loaded |
+| `GET /api/search?…` | `q`, `albumId`, `mode`, `type`, `takenAfter`, `takenBefore`, `limit` (default 100, max 500). Answer: `{"items": [TimelineItem + "score": 0.31], "model": "…"}` where `TimelineItem` is exactly the asset shape `/api/timeline/bucket` returns, so the grid renders it unchanged. `503 {"detail":"model not ready"}` until the model is loaded — **except `mode=metadata`** (file-name search), which never needs the model and never answers 503 |
 | `GET /api/search/similar/{contentId}?limit=100` | same shape, the image's own vector as the query |
-| `GET /api/search/status` | `{"model": "…", "ready": false, "downloading": {"receivedBytes": N, "totalBytes": N, "file": "vision.onnx"} or null, "embedded": N, "total": N, "enabled": true, "device": "cpu" or "directml" or "coreml"}` |
+| `GET /api/search/status` | `{"model": "…", "ready": false, "downloading": {"receivedBytes": N, "totalBytes": N, "file": "vision.onnx"} or null, "embedded": N, "pending": N, "failed": N, "total": N, "enabled": true, "device": "cpu" or "directml" or "coreml", "waiting": null or "why the embedder is idle", "error": null or "…"}` |
 | `POST /api/search/model/download` | `202`; idempotent |
 | `PUT /api/search/settings` `{"enabled": true}` | `200` |
 
@@ -160,6 +173,17 @@ The web app detects Tauri by `window.__TAURI_INTERNALS__`. Outside Tauri
 merged, registers its own `FakeImageEmbedder` (deterministic vectors derived
 from the sha256) and a trivial in-memory index so everything runs end to end.
 
+Added at integration (2026-10-16): `IImageEmbedder.EmbedImages(IReadOnlyList<SKBitmap>)`
+for batches — the embedding worker hands over eight thumbnails at a time,
+which is 116 against 17 images a second on a GPU — and
+`IVectorIndex.TryGet(long id, out float[] vector)` so "more like this" reads
+the stored vector instead of re-embedding. The core must not reference
+`Microsoft.ML.OnnxRuntime` itself: the library picks the DirectML package
+on `win-x64` and the base package (with CoreML) elsewhere, and the two
+cannot share one publish output. On a hybrid CPU the runtime's default
+thread count was the slowest setting; the host may set
+`SearchOptions.CpuThreads`.
+
 Model files live under `<data>/models/<modelId>/`: `vision.onnx`,
 `text.onnx`, `tokenizer.model`, `manifest.json`. The manifest (shipped inside
 the library as an embedded resource and also published at the download URL)
@@ -185,9 +209,9 @@ Windows, `~/Library/Application Support/TesseraDesktop` on macOS.
 
 | Part | Command | Output |
 |---|---|---|
-| core | `dotnet publish core/src/Tessera.Api -c Release -r <rid> --self-contained -o src-tauri/resources/core` for `win-x64` and `osx-arm64`. **Not single-file.** `AssemblyName` is `tessera-core` | `src-tauri/resources/core/tessera-core(.exe)` plus its native libraries |
+| core | `dotnet publish core/src/Tessera.Api -c Release -r <rid> --self-contained -o src-tauri/resources/core` for `win-x64` and `osx-arm64`. **Not single-file.** `AssemblyName` is `tessera-core` | `src-tauri/resources/core/tessera-core(.exe)` plus its native libraries, about 120 MB and 350 files |
 | web | `pnpm --dir web build` | `web/dist` |
-| shell | `tauri.conf.json`: `frontendDist: "../web/dist"`, `devUrl: "http://localhost:5173"`, `bundle.resources: ["resources/core/**"]`; the shell runs the core from its resource dir | NSIS and MSI on Windows, DMG on macOS arm64 |
+| shell | `tauri.conf.json`: `frontendDist: "../web/dist"`, `devUrl: "http://localhost:5173"`, `beforeDevCommand: "pnpm --dir web dev"`, `beforeBuildCommand: "pnpm --dir web build"` (the Tauri CLI runs them from the repo root), `bundle.resources: ["resources/core/**/*"]` (a bare `**` matches only directories and the build fails); the build refuses an empty `resources/core`; the shell runs the core from its resource dir | NSIS and MSI on Windows, DMG on macOS arm64 |
 
 Signing and notarization: placeholders in CI; unsigned builds until the
 certificates exist.

@@ -69,6 +69,13 @@ public interface IImageEmbedder
     /// </summary>
     float[] EmbedImage(SKBitmap bitmap);
 
+    /// <summary>
+    /// Embeds several bitmaps in one forward pass; the answer is in input
+    /// order. Added at integration: on a GPU a batch of eight is about seven
+    /// times the throughput of one image per call.
+    /// </summary>
+    float[][] EmbedImages(IReadOnlyList<SKBitmap> bitmaps);
+
     /// <summary>Embeds a sentence; empty or whitespace input throws.</summary>
     float[] EmbedText(string text);
 }
@@ -93,6 +100,14 @@ public interface IVectorIndex
     void Upsert(long id, ReadOnlySpan<float> vector);
     bool Remove(long id);
     bool Contains(long id);
+
+    /// <summary>
+    /// The stored vector for an id, as the index reconstructs it (an
+    /// implementation that quantises returns the dequantised, normalised
+    /// vector). False when the id is absent. Added at integration so "more
+    /// like this" does not re-embed the picture.
+    /// </summary>
+    bool TryGet(long id, out float[] vector);
 
     /// <summary>
     /// The <paramref name="k"/> best hits by cosine, best first. When
