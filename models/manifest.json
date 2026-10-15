@@ -1,0 +1,52 @@
+{
+  "modelId": "siglip2-base-patch16-256",
+  "version": 1,
+  "source": "google/siglip2-base-patch16-256",
+  "licence": "Apache-2.0",
+  "release": "models-siglip2-base-v1",
+  "dimensions": 768,
+  "imageSize": 256,
+  "textLength": 64,
+  "weights": "float16",
+  "inputs": {
+    "vision": {
+      "name": "pixel_values",
+      "type": "tensor(float)"
+    },
+    "text": {
+      "name": "input_ids",
+      "type": "tensor(int64)"
+    }
+  },
+  "tokenizer": {
+    "type": "sentencepiece",
+    "bosId": 2,
+    "eosId": 1,
+    "padId": 0,
+    "unkId": 3,
+    "addBos": false,
+    "addEos": true,
+    "paddingSide": "right",
+    "maxLength": 64
+  },
+  "files": [
+    {
+      "name": "vision.onnx",
+      "bytes": 186099025,
+      "sha256": "ae478837056f3038d6793d4eb6450f4eacc8fc3b38711a4cd1d899af3f4747c7",
+      "url": "https://github.com/arbaaz360/tessera-desktop/releases/download/models-siglip2-base-v1/vision.onnx"
+    },
+    {
+      "name": "text.onnx",
+      "bytes": 564810160,
+      "sha256": "958aab2836acfcb43b431c5b8215a6b5b778b7998f81cdbd6ea5e0c7799355b0",
+      "url": "https://github.com/arbaaz360/tessera-desktop/releases/download/models-siglip2-base-v1/text.onnx"
+    },
+    {
+      "name": "tokenizer.model",
+      "bytes": 4241003,
+      "sha256": "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2",
+      "url": "https://github.com/arbaaz360/tessera-desktop/releases/download/models-siglip2-base-v1/tokenizer.model"
+    }
+  ]
+}

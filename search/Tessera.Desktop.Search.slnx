@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Tessera.Desktop.Search.Abstractions/Tessera.Desktop.Search.Abstractions.csproj" />
+    <Project Path="src/Tessera.Desktop.Search/Tessera.Desktop.Search.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Tessera.Desktop.Search.Tests/Tessera.Desktop.Search.Tests.csproj" />
+  </Folder>
+</Solution>
