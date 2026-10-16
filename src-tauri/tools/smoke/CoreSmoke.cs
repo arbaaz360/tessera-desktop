@@ -95,6 +95,9 @@ internal static class CoreSmoke
         Report report, Process core, Stopwatch sw, string token, string origin, string library, string data,
         int expected, bool embeddings, string? expectDevice, TimeSpan timeout, Dictionary<string, (long, DateTime)> before, List<string> stderr)
     {
+        var started = DateTime.UtcNow - sw.Elapsed;   // when the process was started
+        double SinceStart() => (DateTime.UtcNow - started).TotalSeconds;
+
         // ---------------------------------------------------------------- ready
         string? line;
         try
@@ -156,6 +159,18 @@ internal static class CoreSmoke
 
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
+        // ------------------------------------------------------- first search
+        // The model is in place, so the core loads it at start: search must
+        // answer within seconds (on the CPU on macOS, CoreML still compiling).
+        if (embeddings)
+        {
+            var answered = await FirstSearchAsync(http, TimeSpan.FromSeconds(120));
+            var status = await http.GetFromJsonAsync<JsonNode>("/api/search/status");
+            report.Number("core start to the first search answer", answered is null ? "none within 120 s" : $"{SinceStart():F1} s, device {status?["device"]}");
+            report.Check(answered is not null && SinceStart() < 60, "GET /api/search answers within 60 s of the core starting",
+                answered is null ? $"status {status?.ToJsonString()}" : $"{SinceStart():F1} s");
+        }
+
         // ----------------------------------------------------------------- root
         sw.Restart();
         using (var added = await http.PostAsJsonAsync("/api/library/roots", new { path = library }))
@@ -196,9 +211,18 @@ internal static class CoreSmoke
                 s.EmbedReady && s.EmbedPending == 0 && s.EmbedDone + s.EmbedFailed >= expected);
             var embedSeconds = sw.Elapsed.TotalSeconds;
             var status = await http.GetFromJsonAsync<JsonNode>("/api/search/status");
-            report.Number("search device", $"{status?["device"]}");
+            report.Number("search device when the last picture was embedded", $"{status?["device"]}");
             if (expectDevice is not null)
             {
+                // The device may still be moving (CPU first, CoreML when compiled).
+                var wait = Stopwatch.StartNew();
+                while ((string?)status?["device"] != expectDevice && wait.Elapsed < TimeSpan.FromMinutes(20))
+                {
+                    await Task.Delay(1000);
+                    status = await http.GetFromJsonAsync<JsonNode>("/api/search/status");
+                }
+
+                report.Number($"core start to device {expectDevice}", (string?)status?["device"] == expectDevice ? $"{SinceStart():F1} s" : "not within 20 min");
                 report.Check((string?)status?["device"] == expectDevice, $"/api/search/status reports device {expectDevice}", $"{status?["device"]}");
             }
 
@@ -325,6 +349,24 @@ internal static class CoreSmoke
 
             await Task.Delay(500);
         }
+    }
+
+    /// <summary>Polls a text search until it answers 200 (503 while the model loads). Null on timeout.</summary>
+    private static async Task<JsonNode?> FirstSearchAsync(HttpClient http, TimeSpan timeout)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.Elapsed < timeout)
+        {
+            using var answer = await http.GetAsync("/api/search?q=a%20solid%20red%20square&limit=1");
+            if (answer.StatusCode == HttpStatusCode.OK)
+            {
+                return await answer.Content.ReadFromJsonAsync<JsonNode>();
+            }
+
+            await Task.Delay(250);
+        }
+
+        return null;
     }
 
     private static async Task<HttpStatusCode> StatusAsync(HttpClient http, HttpMethod method, string path, string? token = null)

@@ -260,9 +260,10 @@ jobs:
   # The parts on a Mac without the shell: the core's and the search
   # library's tests, the real model through ModelStore on CoreML and on the
   # CPU, and the published core driven through the contract's handshake
-  # (src-tauri/tools/smoke). The numbers land in the job summary. CoreML
-  # compiles the model three times here (tests, search, core: about two
-  # minutes per tower on this runner), hence the timeout.
+  # (src-tauri/tools/smoke). The numbers land in the job summary. On macOS
+  # search is ready on the CPU in seconds and moves to CoreML when it has
+  # compiled; CoreML compiles three times here (tests, search, core: about
+  # two minutes per tower on this runner), hence the timeout.
   smoke-macos:
     name: smoke (macos-latest)
     runs-on: macos-latest
@@ -331,8 +332,9 @@ jobs:
           fi
           dotnet test search --logger "console;verbosity=detailed"
 
-      # Device must be CoreML with PreferGpu; red first on both devices;
-      # CoreML and CPU vectors within cosine 0.999; cold and warm loads.
+      # PreferGpu: ready on the CPU and a first search within 30 s, then
+      # Device CoreML; red first on both devices; CoreML and CPU vectors
+      # within cosine 0.999; a second launch from the CoreML cache.
       - name: Search with the real model (CoreML and CPU)
         if: ${{ !cancelled() && steps.model.outcome == 'success' }}
         run: |
@@ -356,6 +358,26 @@ jobs:
           [ "${{ steps.model.outcome }}" = success ] && models=(--models-from "$HOME/tessera-models" --embeddings --expect-device coreml)
           "$RUNNER_TEMP/smoke/tessera-smoke" core "$RUNNER_TEMP/core/tessera-core" \
             "$RUNNER_TEMP/library" "$RUNNER_TEMP/data" "${models[@]}" --timeout 600
+
+      # Not a gate: what the CoreML cache holds, and whether the vision
+      # model loads from a copy without the uncompiled ML packages.
+      - name: CoreML cache, what it holds
+        if: ${{ !cancelled() && steps.model.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          id="${{ steps.model-key.outputs.id }}"
+          cache="$HOME/tessera-models/$id/coreml"
+          echo "--- per tower"; du -sh "$cache"/*
+          echo "--- per partition: the ML package (model/) and the compiled model"
+          find "$cache" -mindepth 4 -maxdepth 4 \( -name model -o -name compiled_model.mlmodelc \) -exec du -sh {} + | sed "s|$cache/||"
+          echo "--- files over 10 MB"
+          find "$cache" -type f -size +10M -exec ls -l {} + | awk '{printf "%8.0f MB  %s\n", $5/1048576, $9}' | sed "s|$cache/||"
+          vision=$(ls -d "$cache"/vision-*)
+          pruned="$RUNNER_TEMP/pruned/$(basename "$vision")"
+          mkdir -p "$(dirname "$pruned")" && cp -R "$vision" "$pruned"
+          find "$pruned" -mindepth 3 -maxdepth 3 -name model -type d | while read -r d; do rm -rf "$d" && mkdir "$d"; done
+          echo "--- the vision cache without its ML packages: $(du -sh "$pruned" | cut -f1) (was $(du -sh "$vision" | cut -f1))"
+          "$RUNNER_TEMP/smoke/tessera-smoke" coreml "$HOME/tessera-models/$id/vision.onnx" --units CPUAndGPU --cache "$pruned" --label pruned || echo "probe exit $?"
 
       # Not a gate: how much of a warm CoreML start is Core ML itself,
       # loading the compiled vision model the search step left in the cache.
