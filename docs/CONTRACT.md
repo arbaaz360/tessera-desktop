@@ -105,15 +105,24 @@ All JSON. Errors are an HTTP status plus `{"detail": "…"}`. Times are ISO
   "roots": [{
     "id": 1, "path": "C:\\Users\\me\\References", "label": "References", "enabled": true,
     "counts": {"files": 12034, "contents": 11870, "trashed": 3},
-    "lastScan": {"startedAt": "…", "finishedAt": "…", "seen": 12034, "added": 10, "moved": 2, "gone": 0, "errors": 0},
+    "lastScan": {"startedAt": "…", "finishedAt": "…", "seen": 12034, "added": 10, "moved": 2, "copies": 1, "unchanged": 12021, "gone": 0, "errors": 0},
     "scanning": false
   }],
   "thumbnails": {"pending": 120, "done": 11750},
+  "dates": {"pending": 0, "done": 11870, "exif": 9000, "filename": 300, "mtime": 2570, "unreadable": 0},
   "embeddings": {"pending": 300, "done": 11570, "model": "siglip2-base-patch16-256", "ready": true},
   "licence": {"state": "free", "cap": 2000, "indexed": 11870, "capReached": true},
   "watch": {"running": true, "lastTick": "…"}
 }
 ```
+
+Scan counts (added 2026-10-16): `added` is new bytes; `copies` is known
+bytes at a new path while another live copy is still on disk; `moved` is
+known bytes at a new path whose old path is gone (a rename is moved 1,
+gone 0); `gone` is a path that disappeared with no new home. `dates` counts
+where each picture's capture date came from: EXIF, XMP or QuickTime
+headers (`exif`), a date in the file name (`filename`), or the modified
+time (`mtime`); `pending` is what the header backfill has not read yet.
 
 | Route | Answer |
 |---|---|

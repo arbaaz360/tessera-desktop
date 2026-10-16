@@ -31,7 +31,7 @@ clean shutdown.
 | Measured (Windows, RTX 5060 Ti, NVMe) | Number |
 |---|---|
 | MSI / NSIS installer | 75 MB / 55 MB, without the model |
-| Model download, first run, no token, from the public model repo | 755 MB in about 2 min, hashes verified |
+| Model download, first run, no token, from the public model repo | 755 MB in about 2 min (v1, measured); v2 is 559 MB |
 | 300 screenshots, folder added → searchable | 11.5 s, 0 errors |
 | Text search over 336 pictures | about 30 ms |
 | "More like this" | 4 ms |
@@ -50,12 +50,19 @@ application windows it is weak, as the search README already found; that is
 the model's domain, not a defect, and the buyers keep photographs and
 artwork.
 
+Fixed on 2026-10-16, second round: capture dates come from EXIF, XMP or
+QuickTime headers, then a date in the file name, then the modified time;
+a second identical file now counts as a copy, not a move; the model
+download is 559 MB instead of 755 MB (v2: the text tower's vocabulary
+table is int8; all nine ground-truth queries keep the same top five).
+Tests on main: core 174, search 39.
+
 | Not done | Why |
 |---|---|
-| macOS | nothing has run on a Mac yet |
-| Signing, updater key, Gumroad product id | placeholders until the certificates and the product exist |
-| Duplicate copies counted as "moved" in a scan's numbers | small counting defect in the scanner; the duplicates view itself is right |
-| Smaller model download | the text tower's vocabulary is 565 MB; int8 on that table would save about 200 MB |
+| macOS GPU search | CI builds an unsigned arm64 DMG (64.8 MiB), the app launches, and the core passes its checks on macOS with search on CPU. CoreML refuses the model (the export's patch Conv needs explicit `pads`, then a fixed batch size); fixes proposed, not yet verified |
+| GitHub Actions | stopped starting jobs on 2026-10-16: the account's payment or spending limit needs fixing in GitHub Billing |
+| Signing, updater key, Gumroad product id | placeholders until the certificates and the product exist; Tauri will not sign the core's 354 files on macOS, which notarization needs |
+| UI tested by hand through the installer | in progress |
 
 ## Build
 
