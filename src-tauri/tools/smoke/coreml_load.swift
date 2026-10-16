@@ -1,6 +1,7 @@
 // Times Core ML's own load of a compiled model (.mlmodelc), without ONNX
-// Runtime: how much of a CoreML session's start is Core ML specialising the
-// model for the device. CI runs it on the models ONNX Runtime cached.
+// Runtime: how much of a CoreML session's start is Core ML preparing the
+// model for the device. CI runs it on the vision model the search library
+// cached (the smoke job's last step, not a gate).
 //
 //     swift coreml_load.swift <compiled_model.mlmodelc> [cpuOnly|cpuAndGPU|all]...
 
@@ -31,5 +32,5 @@ for name in names {
     }
 }
 if #available(macOS 14.0, *) {
-    print("GPU devices visible to Core ML: \(MLAllComputeDevices().map { "\($0)" })")
+    print("compute devices Core ML sees: \(MLModel.availableComputeDevices.map { "\($0)" })")
 }
