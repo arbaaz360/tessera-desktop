@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { assetOriginalUrl, assetThumbnailUrl, assetVideoUrl } from '@/shared/api/client';
 import type { TimelineAsset } from '@/shared/api/timeline';
 import { Thumbhash } from '@/shared/ui/Thumbhash';
 import { ConfirmDialog } from '@/features/selection/ConfirmDialog';
 import { useBulkFavorite, useBulkTrash } from '@/features/selection/api';
+import { useRestoreAssets } from '@/features/trash/api';
+import { apiErrorMessage } from '@/shared/api/tessera';
 import { INSECURE_CONTEXT_HINT, canCopyImages, copyImageToClipboard } from './copyImage';
 import { InfoPanel } from './InfoPanel';
 
@@ -24,6 +26,10 @@ import { InfoPanel } from './InfoPanel';
  *
  * The actions reuse the SELECTION feature's mutations with a single id - a
  * bulk endpoint with one element is the same endpoint.
+ *
+ * Opened from the Trash page (`mode="trash"`) the one action that fits is
+ * Restore: favouriting or finding "more like this" from a hidden picture is
+ * not coherent, and moving it to the trash again even less so.
  */
 
 export interface AssetViewerProps {
@@ -31,12 +37,15 @@ export interface AssetViewerProps {
   index: number;
   onIndexChange: (index: number) => void;
   onClose: () => void;
+  /** `trash`: the picture is in the trash; offer Restore instead of Trash. */
+  mode?: 'library' | 'trash';
 }
 
 const INFO_PANEL_KEY = 'tessera.viewer.info';
 
-export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetViewerProps) {
+export function AssetViewer({ assets, index, onIndexChange, onClose, mode = 'library' }: AssetViewerProps) {
   const asset = assets[index];
+  const inTrash = mode === 'trash';
   const navigate = useNavigate();
   // Whether the original has arrived. The thumbnail stays up until the
   // original has decoded (and stays for good if the browser cannot decode it).
@@ -70,18 +79,60 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
    */
   const [favoriteOverrides, setFavoriteOverrides] = useState<Record<string, boolean>>({});
 
+  /*
+   * Pictures trashed (or, in the trash, restored) from this viewer. The
+   * snapshot still holds them, so they are skipped rather than spliced out:
+   * the parent owns the index into the snapshot. Without this the counter
+   * kept counting a trashed picture and one step back showed it again, ready
+   * to be trashed a second time (Windows UI test, 2026-10-16).
+   */
+  const [removed, setRemoved] = useState<ReadonlySet<string>>(() => new Set());
+
   const favorite = useBulkFavorite();
   const trash = useBulkTrash();
+  const restore = useRestoreAssets();
 
   const isFavorite = asset ? (favoriteOverrides[asset.id] ?? asset.isFavorite) : false;
 
-  const go = useCallback(
-    (delta: number) => {
-      const next = index + delta;
-      if (next >= 0 && next < assets.length) onIndexChange(next);
+  const nextLive = useCallback(
+    (from: number, step: 1 | -1, gone: ReadonlySet<string> = removed) => {
+      for (let i = from + step; i >= 0 && i < assets.length; i += step) {
+        const candidate = assets[i];
+        if (candidate && !gone.has(candidate.id)) return i;
+      }
+      return null;
     },
-    [index, assets.length, onIndexChange],
+    [assets, removed],
   );
+
+  const { position, liveCount } = useMemo(() => {
+    let live = 0;
+    let at = 0;
+    assets.forEach((candidate, i) => {
+      if (removed.has(candidate.id)) return;
+      live += 1;
+      if (i <= index) at = live;
+    });
+    return { position: at, liveCount: live };
+  }, [assets, removed, index]);
+
+  const go = useCallback(
+    (delta: 1 | -1) => {
+      const next = nextLive(index, delta);
+      if (next !== null) onIndexChange(next);
+    },
+    [index, nextLive, onIndexChange],
+  );
+
+  /** The current picture left this view: show the next one, or close. */
+  const leaveCurrent = useCallback(() => {
+    if (!asset) return;
+    const gone = new Set(removed).add(asset.id);
+    setRemoved(gone);
+    const next = nextLive(index, 1, gone) ?? nextLive(index, -1, gone);
+    if (next === null) onClose();
+    else onIndexChange(next);
+  }, [asset, removed, nextLive, index, onIndexChange, onClose]);
 
   const toggleFavorite = useCallback(() => {
     if (!asset) return;
@@ -112,19 +163,15 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
     trash.mutate([asset.id], {
       onSuccess: () => {
         setConfirmingTrash(false);
-        // The snapshot still contains the trashed asset, so "advance" means
-        // moving the cursor rather than splicing the array - the grid drops
-        // the asset on its own refetch. Last asset trashed: close.
-        if (index < assets.length - 1) {
-          onIndexChange(index + 1);
-        } else if (index > 0) {
-          onIndexChange(index - 1);
-        } else {
-          onClose();
-        }
+        leaveCurrent();
       },
     });
-  }, [asset, trash, index, assets.length, onIndexChange, onClose]);
+  }, [asset, trash, leaveCurrent]);
+
+  const restoreCurrent = useCallback(() => {
+    if (!asset) return;
+    restore.mutate([asset.id], { onSuccess: leaveCurrent });
+  }, [asset, restore, leaveCurrent]);
 
   useEffect(() => {
     setFullLoaded(false);
@@ -147,10 +194,10 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
           break;
         case 'f':
         case 'F':
-          toggleFavorite();
+          if (!inTrash) toggleFavorite();
           break;
         case 'Delete':
-          setConfirmingTrash(true);
+          if (!inTrash) setConfirmingTrash(true);
           break;
         case 'i':
         case 'I':
@@ -158,7 +205,7 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
           break;
         case 'm':
         case 'M':
-          moreLikeThis();
+          if (!inTrash) moreLikeThis();
           break;
         default:
           break;
@@ -174,7 +221,7 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
       window.removeEventListener('keydown', onKey);
       document.body.style.overflow = previousOverflow;
     };
-  }, [go, onClose, toggleFavorite, moreLikeThis, confirmingTrash, showInfo]);
+  }, [go, onClose, toggleFavorite, moreLikeThis, confirmingTrash, showInfo, inTrash]);
 
   // Preload the neighbours so paging feels instant rather than staged.
   useEffect(() => {
@@ -209,11 +256,12 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
         </button>
 
         <span className="text-sm tabular-nums">
-          {index + 1} / {assets.length.toLocaleString()}
+          {position.toLocaleString()} / {liveCount.toLocaleString()}
         </span>
 
         <span className="ml-auto text-sm text-white/60">{formatDate(asset.fileCreatedAt)}</span>
 
+        {!inTrash && (
         <button
           type="button"
           onClick={toggleFavorite}
@@ -226,8 +274,9 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
             <path d="m12 3 2.7 5.8 6.3.7-4.7 4.3 1.3 6.2L12 16.9 6.4 20l1.3-6.2L3 9.5l6.3-.7Z" />
           </svg>
         </button>
+        )}
 
-        {asset.isImage && (
+        {asset.isImage && !inTrash && (
           <button
             type="button"
             onClick={moreLikeThis}
@@ -274,18 +323,35 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
           </svg>
         </button>
 
-        <button
-          type="button"
-          onClick={() => setConfirmingTrash(true)}
-          className="rounded-md p-2 hover:bg-white/10 hover:text-danger"
-          aria-label="Move to trash"
-          title="Move to trash (Delete)"
-        >
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-            <path d="M4 7h16M10 11v6m4-6v6M6 7l1 13h10l1-13M9 7V4h6v3" />
-          </svg>
-        </button>
+        {inTrash ? (
+          <button
+            type="button"
+            onClick={restoreCurrent}
+            disabled={restore.isPending}
+            className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-ink-inverse transition-colors hover:bg-accent-hover disabled:cursor-wait disabled:opacity-60"
+          >
+            {restore.isPending ? 'Restoring…' : 'Restore'}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setConfirmingTrash(true)}
+            className="rounded-md p-2 hover:bg-white/10 hover:text-danger"
+            aria-label="Move to trash"
+            title="Move to trash (Delete)"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <path d="M4 7h16M10 11v6m4-6v6M6 7l1 13h10l1-13M9 7V4h6v3" />
+            </svg>
+          </button>
+        )}
       </header>
+
+      {restore.isError && (
+        <p role="alert" className="bg-danger/20 px-4 py-2 text-sm text-danger">
+          Could not restore this picture: {apiErrorMessage(restore.error)}
+        </p>
+      )}
 
       {/* A ROW, so the panel sits beside the picture rather than over it. The
           inner div keeps its own `relative`, which the nav buttons position
@@ -333,8 +399,8 @@ export function AssetViewer({ assets, index, onIndexChange, onClose }: AssetView
             />
           )}
 
-          <NavButton side="left" onClick={() => go(-1)} disabled={index === 0} />
-          <NavButton side="right" onClick={() => go(1)} disabled={index === assets.length - 1} />
+          <NavButton side="left" onClick={() => go(-1)} disabled={nextLive(index, -1) === null} />
+          <NavButton side="right" onClick={() => go(1)} disabled={nextLive(index, 1) === null} />
         </div>
 
         {showInfo && (

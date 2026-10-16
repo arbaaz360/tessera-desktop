@@ -1,9 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useSelection } from './SelectionContext';
 import { AlbumPicker } from './AlbumPicker';
 import { ConfirmDialog } from './ConfirmDialog';
 import { useBulkAddToAlbum, useBulkFavorite, useBulkTrash } from './api';
+import type { BulkIdResponseDto } from '@/shared/api/types';
 import { apiErrorMessage } from '@/shared/api/tessera';
+import { useAlbums } from '@/shared/api/queries';
 
 /**
  * The floating action bar for a live selection.
@@ -28,6 +30,17 @@ export function SelectionBar() {
   const favorite = useBulkFavorite();
   const addToAlbum = useBulkAddToAlbum();
   const trash = useBulkTrash();
+  const albums = useAlbums();
+
+  // "Added 4 to Lakes": the picker closes and the selection stays (people
+  // chain actions), so without a line saying so nothing showed that the add
+  // happened (Windows UI test, 2026-10-16). Gone after a few seconds.
+  const [added, setAdded] = useState<string | null>(null);
+  useEffect(() => {
+    if (!added) return;
+    const timer = setTimeout(() => setAdded(null), 4000);
+    return () => clearTimeout(timer);
+  }, [added]);
 
   if (!selection.active) return null;
 
@@ -47,10 +60,28 @@ export function SelectionBar() {
           <AlbumPicker
             disabled={addToAlbum.isPending}
             onPick={(albumId) =>
-              addToAlbum.mutate({ albumId, ids }, { onSuccess: () => setPanel('none') })
+              addToAlbum.mutate(
+                { albumId, ids },
+                {
+                  onSuccess: (results) => {
+                    setPanel('none');
+                    const name = albums.data?.find((album) => album.id === albumId)?.albumName ?? 'the album';
+                    setAdded(addedMessage(results, ids.length, name));
+                  },
+                },
+              )
             }
           />
         </div>
+      )}
+
+      {added && (
+        <p
+          role="status"
+          className="pointer-events-auto rounded-md border border-line bg-overlay px-3 py-1.5 text-sm text-ink shadow-lg"
+        >
+          {added}
+        </p>
       )}
 
       <div className="pointer-events-auto flex items-center gap-1 rounded-xl border border-line bg-overlay px-2 py-1.5 shadow-xl">
@@ -113,6 +144,13 @@ export function SelectionBar() {
       )}
     </div>
   );
+}
+
+/** What one add did, in counts: the core answers per id, and a picture already in the album is not added twice. */
+export function addedMessage(results: BulkIdResponseDto[] | undefined, asked: number, album: string): string {
+  const added = results ? results.filter((result) => result.success).length : asked;
+  const already = asked - added;
+  return `Added ${added.toLocaleString()} to ${album}` + (already > 0 ? ` · ${already.toLocaleString()} already there` : '');
 }
 
 function BarButton({

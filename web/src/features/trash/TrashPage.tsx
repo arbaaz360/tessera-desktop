@@ -155,6 +155,7 @@ function TrashPageBody() {
           index={viewer.index}
           onIndexChange={(index) => setViewer((current) => (current ? { ...current, index } : null))}
           onClose={() => setViewer(null)}
+          mode="trash"
         />
       )}
     </div>
