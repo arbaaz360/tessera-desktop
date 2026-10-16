@@ -7,7 +7,7 @@ import type { DuplicateSet, Library, LibraryRoot } from '@/shared/api/types';
 import { formatBytes, formatDateTime } from '@/shared/format';
 import { ConfirmDialog } from '@/features/selection/ConfirmDialog';
 import { Bar, SearchModelProgress } from './SearchModelProgress';
-import { useAddRoot, useDuplicates, useLibrary, useRemoveRoot, useScanRoot } from './api';
+import { thumbnailsHeldByCap, useAddRoot, useDuplicates, useLibrary, useRemoveRoot, useScanRoot } from './api';
 
 /**
  * The library: folders, progress, counts, drift.
@@ -265,7 +265,8 @@ function Stat({ label, value, danger }: { label: string; value: number; danger?:
 function Progress({ library }: { library: Library }) {
   const thumbs = library.thumbnails;
   const embeds = library.embeddings;
-  const thumbTotal = thumbs.pending + thumbs.done;
+  const held = thumbnailsHeldByCap(library);
+  const thumbPending = thumbs.pending - held;
   const embedTotal = embeds.pending + embeds.done;
 
   return (
@@ -275,8 +276,11 @@ function Progress({ library }: { library: Library }) {
         <div className="mt-3">
           <Bar
             value={thumbs.done}
-            max={thumbTotal}
-            label={`${thumbs.done.toLocaleString()} done · ${thumbs.pending.toLocaleString()} pending`}
+            max={thumbs.done + thumbPending}
+            label={
+              `${thumbs.done.toLocaleString()} done · ${thumbPending.toLocaleString()} pending` +
+              (held > 0 ? ` · ${held.toLocaleString()} held by the free tier` : '')
+            }
           />
         </div>
       </div>

@@ -63,6 +63,15 @@ async function resolveOnce(): Promise<CoreInfo> {
   return { baseUrl, token };
 }
 
+/**
+ * The shell restarted the core somewhere else (see `coreRestarts.ts`): later
+ * callers, such as the boot screen's retry, get the new address, not the
+ * memoised dead one.
+ */
+export function rememberCore(info: CoreInfo): void {
+  resolved = Promise.resolve(info);
+}
+
 /** Tests only: forget the memoised answer. */
 export function resetCoreForTests(): void {
   resolved = null;

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { RouterProvider } from '@tanstack/react-router';
 import { configureApi, type CoreInfo } from '@/shared/api/client';
 import { CoreUnavailableError, isCoreReady, resolveCore } from '@/shared/api/core';
+import { useFollowCoreRestarts } from '@/shared/api/coreRestarts';
+import { queryClient } from './queryClient';
 import { router } from './router';
 
 /**
@@ -19,6 +21,10 @@ import { router } from './router';
  *
  * Two distinct failures get two distinct screens: "no core configured" is a
  * developer's problem (the env file), "not ready yet" is a moment's patience.
+ *
+ * After boot the shell may restart the core on a new port with a new token
+ * (`core-ready`); the app follows it and remounts under the new address
+ * rather than talking to a dead port until someone restarts it.
  */
 
 type Phase =
@@ -72,7 +78,12 @@ export function AppBoot() {
     };
   }, [boot]);
 
-  if (phase.kind === 'ready') return <RouterProvider router={router} />;
+  const generation = useFollowCoreRestarts(phase.kind === 'ready', () => {
+    // Whatever failed while the core was down is worth asking again.
+    void queryClient.invalidateQueries();
+  });
+
+  if (phase.kind === 'ready') return <RouterProvider key={generation} router={router} />;
 
   return (
     <div className="grid h-full place-items-center bg-ground px-6 text-center text-ink">

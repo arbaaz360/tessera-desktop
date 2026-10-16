@@ -80,7 +80,7 @@ export function TimelineGrid({ query, onSelect, emptyMessage }: TimelineGridProp
   useEffect(() => () => observerRef.current?.disconnect(), []);
 
   const options: LayoutOptions = useMemo(
-    () => ({ containerWidth: width, targetRowHeight: TARGET_ROW_HEIGHT, gap: GAP }),
+    () => ({ containerWidth: rowWidth(width), targetRowHeight: TARGET_ROW_HEIGHT, gap: GAP }),
     [width],
   );
 
@@ -159,13 +159,7 @@ export function TimelineGrid({ query, onSelect, emptyMessage }: TimelineGridProp
               key={bucket.timeBucket}
               data-index={item.index}
               ref={virtualizer.measureElement}
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                width: '100%',
-                transform: `translateY(${item.start}px)`,
-              }}
+              style={bucketItemStyle(item.start)}
             >
               <BucketBlock
                 bucket={bucket.timeBucket}
@@ -186,6 +180,30 @@ export function TimelineGrid({ query, onSelect, emptyMessage }: TimelineGridProp
 }
 
 const MONTH_HEADER_HEIGHT = 52;
+
+/** Each month's side padding, in pixels. The rows are laid out inside it. */
+const SECTION_PADDING_X = 16;
+
+/**
+ * The width the justified rows fill: the scroller's width less the month's
+ * padding on both sides. Laying the rows out at the full scroller width made
+ * every row 32 px too wide, so the last picture of each row lost 16 px under
+ * the right edge and the right gutter vanished (Windows UI test, 2026-10-16).
+ */
+export function rowWidth(scrollerWidth: number): number {
+  return Math.max(0, scrollerWidth - 2 * SECTION_PADDING_X);
+}
+
+/**
+ * Where one month sits in the virtual list: `top`, not a transform. The
+ * month header is `position: sticky`, and sticky offsets are worked out from
+ * layout, which a transform does not move: under `translateY(start)` every
+ * header but the first stuck `start` pixels below the top of the view,
+ * floating over the pictures (Windows UI test, 2026-10-16).
+ */
+export function bucketItemStyle(start: number): React.CSSProperties {
+  return { position: 'absolute', top: start, left: 0, width: '100%' };
+}
 
 function BucketBlock({
   bucket,
@@ -255,7 +273,7 @@ function BucketBlock({
   const label = useMemo(() => formatMonth(bucket), [bucket]);
 
   return (
-    <section className="px-4 pb-6">
+    <section className="pb-6" style={{ paddingInline: SECTION_PADDING_X }}>
       <header
         className="sticky top-0 z-10 flex items-baseline gap-3 bg-ground/85 py-3 backdrop-blur"
         style={{ height: MONTH_HEADER_HEIGHT }}
