@@ -10,6 +10,7 @@ import type {
   Settings,
   SettingsPatch,
 } from '@/shared/api/types';
+import { modelState } from './modelState';
 
 /**
  * The core's own routes (contract §4): the library, search status, settings
@@ -27,11 +28,25 @@ import type {
 const BUSY_POLL_MS = 2_000;
 const IDLE_POLL_MS = 15_000;
 
+/**
+ * Thumbnails the free tier is holding back. The core counts the pictures
+ * beyond the cap as pending thumbnails, but nothing will make them until a
+ * licence arrives, so they are not work in progress: shown as "pending" they
+ * read as a queue that never drains, and polled as busy they keep the page
+ * asking every two seconds for ever. The cap and the count found say how
+ * many there are.
+ */
+export function thumbnailsHeldByCap(library: Library): number {
+  const { licence, thumbnails } = library;
+  if (licence.state !== 'free' || !licence.capReached) return 0;
+  return Math.min(thumbnails.pending, Math.max(0, licence.indexed - licence.cap));
+}
+
 /** Is anything in the library still being worked on? */
 export function libraryIsBusy(library: Library): boolean {
   return (
     library.roots.some((root) => root.scanning) ||
-    library.thumbnails.pending > 0 ||
+    library.thumbnails.pending - thumbnailsHeldByCap(library) > 0 ||
     (library.embeddings.pending > 0 && library.embeddings.ready)
   );
 }
@@ -98,8 +113,8 @@ export function useDuplicates(limit = 200) {
  * either. Only "ready and every picture embedded" is idle.
  */
 export function searchIsBusy(status: SearchStatus): boolean {
-  if (!status.enabled) return false;
-  return !status.ready || status.downloading !== null || status.embedded < status.total;
+  const state = modelState(status);
+  return state !== 'off' && state !== 'ready';
 }
 
 export function useSearchStatus(options: { poll?: boolean } = {}) {

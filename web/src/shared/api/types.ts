@@ -155,15 +155,26 @@ export interface DuplicateSet {
 
 export type SearchDevice = 'cpu' | 'directml' | 'coreml';
 
-/** `GET /api/search/status`. */
+/**
+ * `GET /api/search/status`. The core leaves null fields out of the JSON, so
+ * `downloading`, `waiting` and `error` arrive as absent as often as null;
+ * read them with `!= null`.
+ */
 export interface SearchStatus {
   model: string;
   ready: boolean;
-  downloading: { receivedBytes: number; totalBytes: number; file: string } | null;
+  downloading?: { receivedBytes: number; totalBytes: number; file: string } | null;
   embedded: number;
   total: number;
+  pending?: number;
+  failed?: number;
   enabled: boolean;
+  /** Meaningful once `ready`; before that the core reports its fallback. */
   device: SearchDevice;
+  /** Why the embedder is idle, in the core's words. */
+  waiting?: string | null;
+  /** Why the last attempt to make the model ready failed. */
+  error?: string | null;
 }
 
 /**

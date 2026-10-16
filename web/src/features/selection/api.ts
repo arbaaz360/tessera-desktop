@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { apiJson } from '@/shared/api/tessera';
 import type { BulkIdResponseDto } from '@/shared/api/types';
 import { qk } from '@/shared/api/queries';
@@ -40,6 +40,19 @@ export function useBulkAddToAlbum() {
 }
 
 /**
+ * What a picture entering or leaving the trash changes: every timeline (the
+ * grid, albums, the trash itself) and the library's counts, which the
+ * sidebar footer and the Library page show. Without the second the footer
+ * kept the old picture count until its next slow poll.
+ */
+export function invalidateAfterTrashChange(client: QueryClient): Promise<unknown> {
+  return Promise.all([
+    client.invalidateQueries({ queryKey: qk.timeline.all }),
+    client.invalidateQueries({ queryKey: qk.library.all }),
+  ]);
+}
+
+/**
  * Trash. `force: false` is the entire contract: the core marks the pictures
  * trashed instead of touching files, and the Trash page can restore them.
  * Nothing in this app ever sends `force: true`; the core answers 403 to it.
@@ -49,6 +62,6 @@ export function useBulkTrash() {
   return useMutation({
     mutationFn: (ids: string[]) =>
       apiJson<void>('/api/assets', { method: 'DELETE', body: JSON.stringify({ ids, force: false }) }),
-    onSuccess: () => client.invalidateQueries({ queryKey: qk.timeline.all }),
+    onSuccess: () => invalidateAfterTrashChange(client),
   });
 }

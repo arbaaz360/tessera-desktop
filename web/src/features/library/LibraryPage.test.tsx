@@ -72,8 +72,11 @@ describe('LibraryPage', () => {
     expect(within(folders).getByText('11,870')).toBeInTheDocument();
     expect(within(folders).getByText(/12,034 files seen/)).toBeInTheDocument();
 
-    // The queues, as counts not ticks.
-    expect(screen.getByRole('progressbar', { name: '11,750 done · 120 pending' })).toBeInTheDocument();
+    // The queues, as counts not ticks. The library is past the free cap, so
+    // the 120 thumbnails still to make are held by it, not pending.
+    expect(
+      screen.getByRole('progressbar', { name: '11,750 done · 0 pending · 120 held by the free tier' }),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole('progressbar', { name: '11,570 done · 300 pending · siglip2-base-patch16-256' }),
     ).toBeInTheDocument();

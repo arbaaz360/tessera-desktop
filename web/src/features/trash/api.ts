@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiJson } from '@/shared/api/tessera';
-import { qk } from '@/shared/api/queries';
+import { invalidateAfterTrashChange } from '@/features/selection/api';
 
 /**
  * Server state for the trash feature: `POST /api/trash/restore/assets` and
@@ -9,8 +9,8 @@ import { qk } from '@/shared/api/queries';
  *
  * The trash CONTENTS need no hooks here - the page reuses the timeline
  * queries with `isTrashed: true`. That is why every mutation below invalidates
- * `qk.timeline.all`: the trash grid IS a timeline query, and restoring an
- * asset changes both it and the main timeline in one stroke.
+ * the timelines (and the library counts): the trash grid IS a timeline query,
+ * and restoring an asset changes both it and the main timeline in one stroke.
  */
 
 export function useRestoreAssets() {
@@ -18,7 +18,7 @@ export function useRestoreAssets() {
   return useMutation({
     mutationFn: (ids: string[]) =>
       apiJson<{ count: number }>('/api/trash/restore/assets', { method: 'POST', body: JSON.stringify({ ids }) }),
-    onSuccess: () => client.invalidateQueries({ queryKey: qk.timeline.all }),
+    onSuccess: () => invalidateAfterTrashChange(client),
   });
 }
 
@@ -26,6 +26,6 @@ export function useRestoreAll() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: () => apiJson<{ count: number }>('/api/trash/restore', { method: 'POST' }),
-    onSuccess: () => client.invalidateQueries({ queryKey: qk.timeline.all }),
+    onSuccess: () => invalidateAfterTrashChange(client),
   });
 }

@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { useNavigate, useParams, useSearch } from '@tanstack/react-router';
+import { useNavigate, useParams, useRouterState, useSearch } from '@tanstack/react-router';
+import { filtersToUrl, parseFilters } from './searchParams';
 
 /**
  * The search box in the top bar.
@@ -36,7 +37,8 @@ export function GlobalSearch() {
   const [term, setTerm] = useState('');
 
   const params = useParams({ strict: false }) as { albumId?: string };
-  const search = useSearch({ strict: false }) as { albumId?: string };
+  const search = useSearch({ strict: false }) as { albumId?: string } & Record<string, unknown>;
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
   const routeAlbumId = params.albumId ?? search.albumId;
 
   // The scope is inherited, not imposed: one click widens the next search back
@@ -52,7 +54,11 @@ export function GlobalSearch() {
     event.preventDefault();
     const query = term.trim();
     if (query.length > 1) {
-      void navigate({ to: '/search', search: { q: query, albumId, similar: undefined } });
+      // On the search page the box refines the search on screen, so the mode
+      // and the filters stay. Dropping them sent a file-name search back to
+      // searching by meaning without a word (Windows UI test, 2026-10-16).
+      const keep = pathname === '/search' ? filtersToUrl(parseFilters(search)) : {};
+      void navigate({ to: '/search', search: { q: query, albumId, similar: undefined, ...keep } });
     }
   }
 

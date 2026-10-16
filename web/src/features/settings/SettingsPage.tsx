@@ -12,6 +12,7 @@ import {
   useSettings,
   useUpdateSettings,
 } from '@/features/library/api';
+import { MODEL_STATE_LABEL, modelState } from '@/features/library/modelState';
 import { BUY_URL } from './licence';
 
 /**
@@ -105,15 +106,13 @@ function SearchSection() {
           </Field>
           <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
             <Info label="Model">{status.data.model}</Info>
-            <Info label="Runs on">{status.data.device}</Info>
+            <Info label="Runs on">{status.data.ready ? status.data.device : '—'}</Info>
             <Info label="Indexed">
               <span className="tabular-nums">
                 {status.data.embedded.toLocaleString()} / {status.data.total.toLocaleString()}
               </span>
             </Info>
-            <Info label="State">
-              {status.data.downloading ? 'downloading' : status.data.ready ? 'ready' : 'not downloaded'}
-            </Info>
+            <Info label="State">{MODEL_STATE_LABEL[modelState(status.data)]}</Info>
           </dl>
           {setEnabled.isError && <p className="text-xs text-danger">{apiErrorMessage(setEnabled.error)}</p>}
         </>

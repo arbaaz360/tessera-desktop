@@ -97,10 +97,11 @@ export function SearchPage() {
             <p className="text-sm text-ink-muted">
               <span className="tabular-nums text-ink">{assets.length.toLocaleString()}</span>{' '}
               {bySimilarity ? (
-                'similar pictures'
+                assets.length === 1 ? 'similar picture' : 'similar pictures'
               ) : (
                 <>
-                  results{q ? <> for <span className="text-ink">"{q}"</span></> : ' for these filters'}
+                  {assets.length === 1 ? 'result' : 'results'}
+                  {q ? <> for <span className="text-ink">"{q}"</span></> : ' for these filters'}
                 </>
               )}
               {!filters.metadataOnly && results.data?.model && (

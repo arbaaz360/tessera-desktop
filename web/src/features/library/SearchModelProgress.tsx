@@ -4,15 +4,19 @@ import { formatBytes } from '@/shared/format';
 import type { SearchStatus } from '@/shared/api/types';
 import { apiErrorMessage } from '@/shared/api/tessera';
 import { useSearchStatus, useStartModelDownload } from './api';
+import { MODEL_DOWNLOAD_SIZE, MODEL_STATE_LABEL, modelState } from './modelState';
 
 /**
  * Where the search model is, in numbers.
  *
- * Four states, each with the one action that fits:
+ * Each state with the one action that fits (see `modelState`):
  *
  *   turned off     → a link to Settings
- *   not downloaded → a button that starts the download (the one network use
- *                    besides the licence check and updates; said out loud)
+ *   loading        → a sentence: the core is checking and loading the model
+ *                    (it does this by itself after every start)
+ *   failed         → the reason and a button that tries the download again
+ *                    (the one network use besides the licence check and
+ *                    updates; said out loud)
  *   downloading    → bytes received of bytes total
  *   ready          → how many pictures have vectors, of how many there are
  *
@@ -53,12 +57,16 @@ export function SearchModelProgress({
   }
 
   const s = status.data;
+  const state = modelState(s);
+  // The core's own reason, when it is something other than "the model is
+  // what we are waiting for" (on battery, paused): that one the line says.
+  const otherReason = s.waiting && !s.waiting.startsWith('model not ready') ? s.waiting : null;
 
   return (
     <div className="space-y-2">
       <StatusLine status={s} compact={compact} />
 
-      {!s.enabled && (
+      {state === 'off' && (
         <p className="text-sm text-ink-muted">
           Search is turned off.{' '}
           <Link to="/settings" className="text-accent underline-offset-2 hover:underline">
@@ -68,19 +76,28 @@ export function SearchModelProgress({
         </p>
       )}
 
-      {s.enabled && !s.ready && !s.downloading && (
+      {state === 'loading' && (
+        <p className="text-sm text-ink-muted">
+          {otherReason
+            ? `Waiting: ${otherReason}.`
+            : 'Getting the model ready on this machine. After each start this takes up to a minute.'}
+        </p>
+      )}
+
+      {state === 'failed' && (
         <div className="flex flex-wrap items-center gap-3">
+          <p className="w-full text-sm text-danger">The model could not be made ready: {s.error}</p>
           <button
             type="button"
             onClick={() => download.mutate()}
             disabled={download.isPending}
             className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-ink-inverse transition-colors hover:bg-accent-hover disabled:opacity-60"
           >
-            {download.isPending ? 'Starting…' : 'Download the search model'}
+            {download.isPending ? 'Starting…' : 'Try the download again'}
           </button>
           {!compact && (
             <p className="text-xs text-ink-faint">
-              About 190 MB, once, from the Tessera release server. It then runs on this machine, offline.
+              {MODEL_DOWNLOAD_SIZE}, once. It then runs on this machine, offline.
             </p>
           )}
           {download.isError && (
@@ -89,7 +106,7 @@ export function SearchModelProgress({
         </div>
       )}
 
-      {s.downloading && (
+      {s.downloading != null && (
         <Bar
           value={s.downloading.receivedBytes}
           max={s.downloading.totalBytes}
@@ -109,21 +126,13 @@ export function SearchModelProgress({
 }
 
 function StatusLine({ status, compact }: { status: SearchStatus; compact: boolean }) {
-  const state = !status.enabled
-    ? 'off'
-    : status.downloading
-      ? 'downloading'
-      : status.ready
-        ? status.embedded < status.total
-          ? 'indexing'
-          : 'ready'
-        : 'not downloaded';
-
   return (
     <p className="text-sm text-ink">
       <span className="font-medium">{status.model}</span>
-      <span className="text-ink-faint"> · {state}</span>
-      {!compact && <span className="text-ink-faint"> · runs on {status.device}</span>}
+      <span className="text-ink-faint"> · {MODEL_STATE_LABEL[modelState(status)]}</span>
+      {/* Before the model loads the core reports its fallback device, which
+          is "cpu" even on a machine that will run it on the GPU. */}
+      {!compact && status.ready && <span className="text-ink-faint"> · runs on {status.device}</span>}
     </p>
   );
 }
