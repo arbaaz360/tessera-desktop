@@ -31,7 +31,7 @@ Environment variables, all optional, none used by the product:
 |---|---|
 | `TESSERA_MODELS_DIR` | a folder with `vision.onnx`, `text.onnx`, `tokenizer.model` for the tests |
 | `TESSERA_QUALITATIVE_DIR` | a folder of non-personal images for the qualitative test |
-| `TESSERA_MODELS_TOKEN` | a GitHub token; lets `ModelStore` fetch release assets through the API while the repository is private. Sent to github.com hosts only |
+| `TESSERA_MODELS_TOKEN` | a GitHub token; lets `ModelStore` fetch release assets through the API from a private repository. Not needed for the shipped manifest, whose files are in the public `arbaaz360/siglip2-base-onnx`. Sent to github.com hosts only |
 | `TESSERA_REAL_DOWNLOAD=1` | with the token: one test downloads the real 755 MB release into `%TEMP%` and verifies it |
 | `TESSERA_CPU_THREADS` | thread count for the CPU throughput test |
 
@@ -170,12 +170,9 @@ Both pinned to the same version, the newest the DirectML package reaches.
   string-keyed provider API (`AppendExecutionProvider("CoreML", …)`) and
   compiles; nobody has run it. Expect to touch `MLComputeUnits` and the
   model format once a Mac is available.
-- **The download URLs in the manifest answer 404 while the repository is
-  private.** They are the release asset URLs the brief asked for and will
-  work the moment the repository or the release is public. Until then only
-  the token path (`TESSERA_MODELS_TOKEN`, API lookup) reaches the files.
-  Buyers cannot be given a token; the release has to be public, or the
-  files hosted elsewhere with the same URLs rewritten in the manifest.
+- ~~The download URLs answered 404 while the repository was private.~~
+  Resolved 2026-10-16: the files moved to the public model-only repository
+  `arbaaz360/siglip2-base-onnx` and the manifest points there.
 - **`IImageEmbedder` has no batch method.** `SiglipEmbedder.EmbedImages`
   exists on the class; the core only sees the interface. A batch method on
   the interface would let the worker get the 7× DirectML gain without

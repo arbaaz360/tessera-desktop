@@ -28,8 +28,12 @@ rows of 768; the embedding table alone is 393 MB in float16. Weights are
 float16, inputs and outputs float32, opset 17. Normalisation is inside the
 graph, so a consumer never divides by a norm.
 
-The repository is private, so the plain download URLs answer 404 until it
-(or the release) is public. See the search README for the developer token.
+The files are published in a separate **public** repository that holds only
+the model release, [`arbaaz360/siglip2-base-onnx`](https://github.com/arbaaz360/siglip2-base-onnx)
+(decided by the owner 2026-10-16), so a buyer's app downloads them with no
+token while this repository stays private. Its README carries the Apache-2.0
+attribution and the list of changes. The first upload to this repository's
+own release of the same tag is superseded.
 
 ## Run the export
 
@@ -48,13 +52,14 @@ float32 (bigger in RAM, no faster on this CPU, so not shipped).
 Then publish and refresh the embedded copy:
 
 ```bash
-gh release create models-siglip2-base-v1 models/out/vision.onnx models/out/text.onnx models/out/tokenizer.model models/out/manifest.json
+gh release create models-siglip2-base-v1 -R arbaaz360/siglip2-base-onnx models/out/vision.onnx models/out/text.onnx models/out/tokenizer.model models/out/manifest.json
 cp models/out/manifest.json models/manifest.json
 cp models/out/fixtures/* search/tests/Tessera.Desktop.Search.Tests/fixtures/
 ```
 
-A new export is a new release tag and a new `version` in the manifest; the
-library only ever trusts the hashes it was built with.
+The URLs in `models/manifest.json` point at that public repository's release
+assets. A new export is a new release tag there and a new `version` in the
+manifest; the library only ever trusts the hashes it was built with.
 
 ## Verification (2026-10-16, ten screenshots and ten sentences)
 

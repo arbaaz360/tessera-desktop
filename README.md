@@ -31,11 +31,17 @@ clean shutdown.
 | Measured (Windows, RTX 5060 Ti, NVMe) | Number |
 |---|---|
 | MSI / NSIS installer | 75 MB / 55 MB, without the model |
-| Model download | 755 MB, once, on first run |
+| Model download, first run, no token, from the public model repo | 755 MB in about 2 min, hashes verified |
 | 300 screenshots, folder added → searchable | 11.5 s, 0 errors |
 | Text search over 336 pictures | about 30 ms |
 | "More like this" | 4 ms |
 | Core shutdown on window close | exit 0 in 0.3 s, no orphan |
+
+Model files are hosted in the public, model-only repository
+[`arbaaz360/siglip2-base-onnx`](https://github.com/arbaaz360/siglip2-base-onnx)
+(owner's decision, 2026-10-16); this repository stays private. A fresh
+install with no token downloaded, verified and loaded the model, then
+searched correctly.
 
 Search quality: on photographs it ranks as a person would. Nine queries over
 the Windows wallpapers and colour swatches all put the right pictures first
@@ -46,7 +52,6 @@ artwork.
 
 | Not done | Why |
 |---|---|
-| Model hosting for buyers | the release lives in this private repo, so its URLs are 404 without a token |
 | macOS | nothing has run on a Mac yet |
 | Signing, updater key, Gumroad product id | placeholders until the certificates and the product exist |
 | Duplicate copies counted as "moved" in a scan's numbers | small counting defect in the scanner; the duplicates view itself is right |

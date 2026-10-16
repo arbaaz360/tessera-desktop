@@ -187,8 +187,10 @@ thread count was the slowest setting; the host may set
 Model files live under `<data>/models/<modelId>/`: `vision.onnx`,
 `text.onnx`, `tokenizer.model`, `manifest.json`. The manifest (shipped inside
 the library as an embedded resource and also published at the download URL)
-lists each file's URL, size and sha256. The index persists to
-`<data>/vectors/<modelId>.bin`.
+lists each file's URL, size and sha256. The URLs point at the release of the
+public, model-only repository `arbaaz360/siglip2-base-onnx`, so the download
+needs no credentials while this repository stays private. The index persists
+to `<data>/vectors/<modelId>.bin`.
 
 ## 7. Data dir layout
 
