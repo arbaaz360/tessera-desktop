@@ -53,7 +53,12 @@ public interface IImageEmbedder
     /// <summary>True once the model files are present, verified and loaded.</summary>
     bool IsReady { get; }
 
-    /// <summary>The device chosen at load time; null before the model is loaded.</summary>
+    /// <summary>
+    /// The device in use now; null before the model is loaded. On macOS it
+    /// starts as <see cref="EmbedDevice.Cpu"/> and changes once to
+    /// <see cref="EmbedDevice.CoreML"/> when Core ML has loaded in the
+    /// background, so read it per call rather than caching it.
+    /// </summary>
     EmbedDevice? Device { get; }
 
     /// <summary>

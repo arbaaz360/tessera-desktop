@@ -194,12 +194,25 @@ thread count was the slowest setting; the host may set
 `SearchOptions.CpuThreads`.
 
 Model files live under `<data>/models/<modelId>/`: `vision.onnx`,
-`text.onnx`, `tokenizer.model`, `manifest.json`. The manifest (shipped inside
-the library as an embedded resource and also published at the download URL)
-lists each file's URL, size and sha256. The URLs point at the release of the
-public, model-only repository `arbaaz360/siglip2-base-onnx`, so the download
-needs no credentials while this repository stays private. The index persists
-to `<data>/vectors/<modelId>.bin`.
+`text.onnx`, `tokenizer.model`, `manifest.json`. The manifest is shipped
+inside the library as an embedded resource and is the only copy the app
+trusts; it lists each file's URL, size and sha256. The URLs point at releases
+of the public, model-only repository `arbaaz360/siglip2-base-onnx`, so the
+download needs no credentials. The index persists to
+`<data>/vectors/<modelId>.bin`.
+
+Per-platform files (manifest version 4, 2026-10-16): an entry may carry
+`platforms`. `vision.onnx` is listed twice: v2's file for Windows and Linux
+(float16 compute, the fast one on DirectML) and v3's for macOS (explicit
+Conv pads and float32 compute, which Core ML needs). `text.onnx` and
+`tokenizer.model` are shared. The two vision files give the same vectors to
+cosine ≥ 0.99999, so `modelId` and every index stay valid across them.
+
+On macOS the embedder is ready on the CPU within seconds and compiles Core
+ML in the background; when that finishes it switches to CoreML, so
+`IImageEmbedder.Device` changes once, from `Cpu` to `CoreML`. Calls already
+running finish on the CPU. If Core ML fails to load, search stays on the
+CPU. The core reads `Device` per request, so `/api/search/status` follows.
 
 ## 7. Data dir layout
 
@@ -208,6 +221,7 @@ to `<data>/vectors/<modelId>.bin`.
   library.db              SQLite, WAL mode
   thumbs/ab/cd/<sha>-thumb.webp
   models/<modelId>/       vision.onnx  text.onnx  tokenizer.model  manifest.json
+  models/<modelId>/coreml/   macOS only: Core ML's compiled models, about 2.6 GB
   vectors/<modelId>.bin
   logs/core-YYYY-MM-DD.log
   core.pid

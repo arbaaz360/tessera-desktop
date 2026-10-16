@@ -57,9 +57,15 @@ download is 559 MB instead of 755 MB (v2: the text tower's vocabulary
 table is int8; all nine ground-truth queries keep the same top five).
 Tests on main: core 174, search 39.
 
+Third round, 2026-10-16: CoreML search works on macOS and CI proves it on
+every job. Macs download a v3 image model (explicit pads, float32
+compute); Windows keeps v2's, so DirectML stays at about 160 img/s. The
+manifest (version 4) lists per-platform files; vectors match across them,
+so `modelId` and existing indexes are unchanged.
+
 | Not done | Why |
 |---|---|
-| macOS GPU search | CI builds an unsigned arm64 DMG (64.8 MiB), the app launches, and the core passes its checks on macOS with search on CPU. CoreML refuses the model (the export's patch Conv needs explicit `pads`, then a fixed batch size); fixes proposed, not yet verified |
+| macOS GPU search on a real Mac | on GitHub's Mac runner search answers on the CPU 8 to 14 s after launch and switches to CoreML 2 to 5 minutes later (8.5 to 10 img/s vs 1.2 on the CPU). A real Mac's GPU is unmeasured; Core ML's cache is about 2.6 GB |
 | Signing, updater key, Gumroad product id | placeholders until the certificates and the product exist; Tauri will not sign the core's 354 files on macOS, which notarization needs |
 | Installer walk by hand (SmartScreen, setup wizard) | the owner is doing it; the UI itself was clicked through and seven fixes are merged |
 
