@@ -221,30 +221,31 @@ Run [38872561745](https://github.com/arbaaz360/tessera-desktop/actions/runs/3887
 
 ### macOS with CoreML (manifest v4: v3's vision tower on macOS)
 
-Run [38968062311](https://github.com/arbaaz360/tessera-desktop/actions/runs/38968062311),
+Runs [38968062311](https://github.com/arbaaz360/tessera-desktop/actions/runs/38968062311)
+and [38971746054](https://github.com/arbaaz360/tessera-desktop/actions/runs/38971746054),
 2026-10-16, same runner; ranges include runs 38953158750 and 38956260548.
 The search library is ready on the CPU at once and moves to CoreML when it
 has compiled (`search/README.md`).
 
 | Measure | Value |
 |---|---|
-| ready on the CPU, `PreferGpu` true | 3.4 s (second launch 2.3 s) |
-| first search answered, from the start of the load | 8.1 s, red first |
-| moved to CoreML | 261 s after ready; 125 s on a second launch, from the cache |
+| ready on the CPU, `PreferGpu` true | 3.4 to 6.3 s (second launch 2.2 to 2.3 s) |
+| first search answered, from the start of the load | 8.1 to 14.1 s, red first |
+| moved to CoreML | 261 to 330 s after ready; 125 to 145 s on a second launch, from the cache |
 | "a solid red square" on CoreML / CPU | red 0.1609 / 0.1612 first, then blue, then green |
 | vectors, CoreML against CPU (red, green, blue, sentence) | 1.00000, 1.00000, 1.00000, 0.99996 |
 | images per second (batch 8, 640x480), CoreML / CPU | 8.5 to 12.9 / 1.2 to 1.7 |
 | text per sentence (median of 10), CoreML / CPU | 9.5 to 15.2 / 125 to 147 ms |
-| Core ML alone loading the cached vision model (Swift) | 99 to 105 s, 51 to 56 s again, 79 to 97 s CPU-only |
-| CoreML cache | 2,590 MB; the compiled models hold their weights as text |
+| Core ML alone loading the cached vision model (Swift) | 99 to 144 s, 48 to 56 s again, 79 to 97 s CPU-only |
+| CoreML cache | 2,590 MB; the compiled models hold their weights as text; 2.0 GB without the uncompiled packages, which still loads |
 | `dotnet test search` | 44 of 44; `GpuMatchesCpu` CoreML vs CPU: text 0.99986, image 1.00000 |
 | model download, macOS entries of manifest v4, no token | 559 MB in 6 to 10 s |
 
 Inside the published core (26 of 26 checks): ready line 2.1 s;
-`/api/search` answers 9.1 s after the process started, on the CPU; 51
+`/api/search` answers 8.1 to 9.1 s after the process started, on the CPU; 51
 pictures scanned and thumbnailed in 2.4 s and all embedded 55 s later,
 most on the CPU while CoreML compiled; `/api/search/status` says
-`device: coreml` 274 s after start; `red.png` first at 0.160 with the index
+`device: coreml` 209 to 274 s after start; `red.png` first at 0.160 with the index
 built on both devices; stdin closed to exit 368 ms.
 
 ## Not done

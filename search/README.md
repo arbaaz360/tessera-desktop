@@ -147,16 +147,17 @@ the embedder stays on the CPU and logs why. The two sides' vectors agree
 or CPU) loads as before, in one step.
 
 On the `macos-latest` runner (macOS 26, Apple silicon, 3 cores, ONNX Runtime
-1.24.4), run
-[38968062311](https://github.com/arbaaz360/tessera-desktop/actions/runs/38968062311):
+1.24.4), runs
+[38968062311](https://github.com/arbaaz360/tessera-desktop/actions/runs/38968062311)
+and [38971746054](https://github.com/arbaaz360/tessera-desktop/actions/runs/38971746054):
 
 | A Mac start, `PreferGpu` true | First launch | Second launch |
 |---|---|---|
-| Ready, on the CPU (sha256 of the model files, both CPU sessions) | 3.4 s | 2.3 s |
-| First search answered, from the start of the load (red first) | 8.1 s | |
-| Moved to CoreML | 261 s after ready (vision compiled in 153 s, text in 108 s) | 125 s after ready, from the cache (vision 62 s, text 60 s) |
-| Inside the published core: `/api/search` answers, from process start | 9.1 s, device `cpu` | |
-| Inside the published core: `/api/search/status` says `coreml` | 274 s after start | |
+| Ready, on the CPU (sha256 of the model files, both CPU sessions) | 3.4 – 6.3 s | 2.2 – 2.3 s |
+| First search answered, from the start of the load (red first) | 8.1 – 14.1 s | |
+| Moved to CoreML | 261 – 330 s after ready (vision compiled in 153 s, text in 108 s) | 125 – 145 s after ready, from the cache (vision 62 s, text 60 s) |
+| Inside the published core: `/api/search` answers, from process start | 8.1 – 9.1 s, device `cpu` | |
+| Inside the published core: `/api/search/status` says `coreml` | 209 – 274 s after start | |
 | The swap with calls running (`SwapsSessionsWhileEmbedsRun`, second CPU set) | 18 calls across it, cosine 1.000000; Windows 37 – 39 | |
 
 | Once loaded | CoreML | CPU |
@@ -168,10 +169,11 @@ On the `macos-latest` runner (macOS 26, Apple silicon, 3 cores, ONNX Runtime
 | Text, median of 10 | 9.5 – 15.2 ms | 125 – 147 ms |
 | Cache on disk | 2,590 MB (79 files) | |
 
-Ranges are over runs 38953158750, 38956260548 and 38968062311. The CoreML
-load itself is Core ML's: loading the cached compiled vision model with
-Core ML alone (`tools/smoke/coreml_load.swift`, no ONNX Runtime) took 99 –
-105 s, 51 – 56 s again, 79 – 97 s CPU-only. Core ML on the runner lists a
+Ranges in the second table are over runs 38953158750, 38956260548,
+38968062311 and 38971746054. The CoreML load itself is Core ML's: loading
+the cached compiled vision model with Core ML alone
+(`tools/smoke/coreml_load.swift`, no ONNX Runtime) took 99 – 144 s, 48 –
+56 s again, 79 – 97 s CPU-only. Core ML on the runner lists a
 GPU ("Apple Paravirtual device") but its compute plan put all 536 ops on
 the CPU. A real Mac is likely faster, and unmeasured.
 
@@ -187,15 +189,30 @@ ML's compiled model inside it (`model/compiled_model.mlmodelc`). Run
 | vision (partition 0 of 4) | 1.4 GB | 1,012 MB | 329 MB |
 | text (partition 1 of 5) | 1.1 GB | 998 MB | 162 MB |
 
-No weight file over 10 MB exists: the weights are inside `model.mil`, a
-text format, about 1 GB per tower (93 M float32 vision weights, 86 M
-float16 text weights). That
-is both the size and the likely reason a load from the cache still takes a
-minute per tower. Not changed: the package part (0.5 GB) is not read once
-the compiled model exists, but deleting it leans on ONNX Runtime's cache
-layout; and with CPU-first a missing cache only delays CoreML (261 s
-against 125 s on the runner), it never blocks search. Dropping the cache
-would save 2.6 GB on every Mac for that delay at every launch; a real Mac's
+The weights are inside `model.mil`, a text format: of the vision
+program's 519 constants, 443 are written inline as decimal numbers and 76
+point at `weights/weight.bin`, which is 3.5 MB (vision) and 1.2 MB at most
+(text). About 1 GB of text per tower (93 M float32 vision weights, 86 M
+float16 text weights) is both the size and the likely reason a load from
+the cache still takes a minute per tower. Why ONNX Runtime's converter
+inlined these initializers, when its own rule sends tensors of ten or more
+elements to the weight file, was not found; binary weights would be about
+a third of the size.
+
+Options, measured in run 38971746054:
+
+| | Disk | Effect |
+|---|---|---|
+| Keep the cache as it is (shipped) | 2.6 GB | CoreML 125 – 145 s after a launch instead of 261 – 330 s |
+| Delete the uncompiled packages (`model/Data`) after a load | about 2.0 GB (vision 1.4 → 1.0 GB, text − 0.16 GB) | loads the same: vision from the pruned copy in 90.5 s, vectors 1.00000 |
+| No cache | 0 | CoreML 261 – 330 s after every launch; search is on the CPU meanwhile, never blocked |
+
+Not changed. Pruning works with ONNX Runtime 1.24.4, but only because
+it checks that `model/` exists and then reads `compiled_model.mlmodelc`
+inside it: an undocumented layout (the folder name carries the runtime
+version, and a cache that fails to load is compiled again, so a mistake
+would cost one compile, not a broken search). Dropping the cache trades
+2.6 GB on every Mac for a later CoreML at every launch; a real Mac's
 numbers should decide it.
 
 `src-tauri/tools/smoke` holds the tools that chose these:
