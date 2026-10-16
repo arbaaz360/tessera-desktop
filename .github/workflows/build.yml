@@ -353,14 +353,17 @@ jobs:
           "$RUNNER_TEMP/smoke/tessera-smoke" core "$RUNNER_TEMP/core/tessera-core" \
             "$RUNNER_TEMP/library" "$RUNNER_TEMP/data" "${models[@]}" --timeout 600
 
-      # Not a gate. CoreML refuses the shipped vision model on this runner
-      # ("Required param 'pad' is missing"; the search step falls back to the
-      # CPU). This tries the candidate fixes, so the one proposed for models/
-      # or search/ has been seen to work on a Mac:
-      #   A  the patch-embedding Conv's padding spelled out, ONNX Runtime as shipped
-      #   B  the model as shipped, a newer ONNX Runtime
-      #   C  both
-      # Remove it once CoreML loads the shipped model.
+      # Not a gate. CoreML refuses the shipped model on this runner and the
+      # search step falls back to the CPU. Two causes found so far: the
+      # patch-embedding Conv's implicit padding ("Required param 'pad' is
+      # missing"), then the dynamic batch ("unbounded dimension which is not
+      # supported"); a newer ONNX Runtime alone changes neither. This tries
+      # raw sessions with the batch fixed, so the fix proposed for models/
+      # and search/ is one seen to work on a Mac:
+      #   1  model as shipped              ONNX Runtime as shipped
+      #   2  Conv padding spelled out      ONNX Runtime as shipped
+      #   3  Conv padding spelled out      newer ONNX Runtime
+      # Remove it once the search step gets CoreML.
       - name: CoreML probe (candidate fixes)
         if: ${{ !cancelled() && steps.model.outcome == 'success' }}
         continue-on-error: true
@@ -371,20 +374,19 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install --quiet onnx
           mkdir -p "$RUNNER_TEMP/patched/$id"
-          "$RUNNER_TEMP/venv/bin/python" -I src-tauri/tools/smoke/explicit_pads.py \
-            "$HOME/tessera-models/$id/vision.onnx" "$RUNNER_TEMP/patched/$id/vision.onnx"
+          "$RUNNER_TEMP/venv/bin/python" -I src-tauri/tools/smoke/explicit_pads.py             "$HOME/tessera-models/$id/vision.onnx" "$RUNNER_TEMP/patched/$id/vision.onnx"
           cp -c "$HOME/tessera-models/$id/text.onnx" "$HOME/tessera-models/$id/tokenizer.model" "$RUNNER_TEMP/patched/$id/"
           dotnet build src-tauri/tools/smoke -c Release -p:ProbeOnnxRuntime=$NEWER_ORT -o "$RUNNER_TEMP/smoke-ort"
-          echo "::group::A: explicit Conv pads, ONNX Runtime as shipped"
-          "$RUNNER_TEMP/smoke/tessera-smoke" search "$RUNNER_TEMP/patched" --require-gpu --load-from "$RUNNER_TEMP/patched/$id" || a=$?
+          echo "::group::1: model as shipped, batch fixed, ONNX Runtime as shipped"
+          "$RUNNER_TEMP/smoke/tessera-smoke" coreml "$HOME/tessera-models/$id" --batch 8 || p1=$?
           echo "::endgroup::"
-          echo "::group::B: model as shipped, ONNX Runtime $NEWER_ORT"
-          "$RUNNER_TEMP/smoke-ort/tessera-smoke" search "$HOME/tessera-models" --require-gpu || b=$?
+          echo "::group::2: explicit Conv pads, batch fixed, ONNX Runtime as shipped"
+          "$RUNNER_TEMP/smoke/tessera-smoke" coreml "$RUNNER_TEMP/patched/$id" --batch 8 || p2=$?
           echo "::endgroup::"
-          echo "::group::C: explicit Conv pads, ONNX Runtime $NEWER_ORT"
-          "$RUNNER_TEMP/smoke-ort/tessera-smoke" search "$RUNNER_TEMP/patched" --require-gpu --load-from "$RUNNER_TEMP/patched/$id" || c=$?
+          echo "::group::3: explicit Conv pads, batch fixed, ONNX Runtime $NEWER_ORT"
+          "$RUNNER_TEMP/smoke-ort/tessera-smoke" coreml "$RUNNER_TEMP/patched/$id" --batch 8 || p3=$?
           echo "::endgroup::"
-          echo "probe exits: A ${a:-0}, B ${b:-0}, C ${c:-0}"
+          echo "probe exits: 1 ${p1:-0}, 2 ${p2:-0}, 3 ${p3:-0}"
 
       - name: Core logs
         if: ${{ failure() }}
