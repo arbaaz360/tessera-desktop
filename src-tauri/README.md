@@ -166,11 +166,12 @@ builds are unsigned and `createUpdaterArtifacts` stays off.
 | launch the app | bundle | `Contents/MacOS/<exe>` with `TESSERA_DATA_DIR` set writes "core … ready on 127.0.0.1" to the shell log within 90 s; a screenshot is the `macos-app-launch` artifact |
 | kill the shell | bundle | after `kill` (SIGTERM) on the shell, the core exits by itself within 20 s and `core.pid` is gone: no orphans |
 | `dotnet test core` | smoke | every test passes |
-| `dotnet test search` | smoke | every test passes; `TESSERA_MODELS_DIR` points at the downloaded model, so the embedder tests compare against the PyTorch reference vectors too |
+| `dotnet test search` | smoke | every test passes; `TESSERA_MODELS_DIR` points at the downloaded model, so the embedder tests compare against the reference vectors, and CoreML against the CPU (`GpuMatchesCpu`, cosine ≥ 0.999) |
 | model download | smoke | `ModelStore` fetches every file in the manifest from the public release, no token, and the sha256s match. The folder is cached with `actions/cache`, keyed on the manifest's sha256s |
-| search | smoke | `tools/smoke search --require-gpu`: with `PreferGpu` true the device is not `Cpu` (CoreML); with true and false the red swatch beats green and blue for "a solid red square"; the two devices' vectors agree (cosine > 0.98) |
-| the core | smoke | `tools/smoke core`: the published `osx-arm64` core started with the contract section 1 environment and `TESSERA_WEB_ORIGIN=tauri://localhost`. 24 checks: one ready line within 30 s and nothing else on stdout; `core.pid`; `/health/*` 200 with and without the token; `/api/library` 401 without or with a wrong token and 200 with `?sessionKey=`; CORS preflight 204 for `tauri://localhost`; `POST /api/library/roots` 201 on 50 generated PNGs and JPEGs plus one HEIC made with `sips`; every picture scanned, thumbnailed (one `.webp` each) and embedded; `/api/search` puts `red.png` first; stdin closed, exit 0 within 20 s, `core.pid` gone; the library folder unchanged, byte for byte |
-| CoreML probe | smoke | not a gate. Tries candidate fixes for CoreML refusing the model (Not done, below) |
+| search | smoke | `tools/smoke search --require-gpu`: the CoreML cache is cleared first; with `PreferGpu` true the first search answers on the CPU within 30 s, then the device moves to `CoreML`; with true and false the red swatch beats green and blue for "a solid red square"; the vectors agree (cosine ≥ 0.999) between CoreML and the CPU and across the move; images per second and text milliseconds for both; a second launch moves to CoreML from the cache |
+| the core | smoke | `tools/smoke core`: the published `osx-arm64` core started with the contract section 1 environment and `TESSERA_WEB_ORIGIN=tauri://localhost`. 24 checks: one ready line within 30 s and nothing else on stdout; `core.pid`; `/health/*` 200 with and without the token; `/api/library` 401 without or with a wrong token and 200 with `?sessionKey=`; CORS preflight 204 for `tauri://localhost`; `POST /api/library/roots` 201 on 50 generated PNGs and JPEGs plus one HEIC made with `sips`; `/api/search` answers within 60 s of the process starting; every picture scanned, thumbnailed (one `.webp` each) and embedded; `/api/search/status` says `device: coreml` within 20 minutes (`--expect-device coreml`); `/api/search` puts `red.png` first; stdin closed, exit 0 within 20 s, `core.pid` gone; the library folder unchanged, byte for byte |
+| CoreML cache | smoke | not a gate. What the cache holds (sizes, weight files, how `model.mil` stores weights), and the vision model loaded from a copy without the uncompiled packages |
+| Core ML alone | smoke | not a gate. `tools/smoke/coreml_load.swift` times Core ML loading the compiled vision model the search step cached, without ONNX Runtime |
 
 Run the harness anywhere (`dotnet build src-tauri/tools/smoke -c Release -o <dir>`):
 
@@ -178,8 +179,17 @@ Run the harness anywhere (`dotnet build src-tauri/tools/smoke -c Release -o <dir
 tessera-smoke images <dir> --count 50
 tessera-smoke model  <models-dir>
 tessera-smoke search <models-dir> --require-gpu
-tessera-smoke core   <core-exe> <library-dir> <new-data-dir> --models-from <models-dir> --embeddings
+tessera-smoke core   <core-exe> <library-dir> <new-data-dir> --models-from <models-dir> --embeddings --expect-device coreml
+tessera-smoke coreml <tower.onnx> [--batch 8] [--units CPUAndGPU] [--format MLProgram] [--cache <dir>] [--loads 2] [--option key=value] [--verbose]
 ```
+
+`coreml` is how the CoreML options were chosen: one tower in a raw ONNX
+Runtime session on CoreML, compared with the CPU picture by picture. With
+`models/coreml_compat.py variants` (candidate graphs) it ran as a temporary
+CI job in runs
+[38947651278](https://github.com/arbaaz360/tessera-desktop/actions/runs/38947651278)
+and [38953158750](https://github.com/arbaaz360/tessera-desktop/actions/runs/38953158750);
+`models/README.md` and `search/README.md` have what they found.
 
 ### macOS numbers
 
@@ -196,9 +206,9 @@ Run [38872561745](https://github.com/arbaaz360/tessera-desktop/actions/runs/3887
 | core start to ready line (smoke) | 806 ms |
 | model download from the public release | 720 MB in 11.1 s, 65 MB/s |
 | `dotnet test core` | 95 of 95 |
-| `dotnet test search` | 37 of 38 (Not done, below) |
+| `dotnet test search` | 37 of 38 then; 41 of 41 with model v3 and CoreML (below) |
 | embedder against the PyTorch reference (CPU) | cosine 1.00000 for 256 px images and every sentence; 0.99677 and 0.99980 for resized inputs |
-| search device with `PreferGpu` true | `Cpu`: CoreML refused the model (Not done, below) |
+| search device with `PreferGpu` true | `Cpu` then: CoreML refused model v2. `CoreML` from model v3 (below) |
 | CPU, images per second | 1.5 (batch 8, 640x480 inputs) |
 | CPU, text per sentence | 126 to 135 ms (median of 10) |
 | model load (sha256 check plus both sessions) | 6.0 to 6.8 s |
@@ -208,6 +218,35 @@ Run [38872561745](https://github.com/arbaaz360/tessera-desktop/actions/runs/3887
 | `/api/search?q=a solid red square` | `red.png` first, score 0.160 |
 | stdin closed to exit | 343 ms, exit code 0 |
 | vector index, 200,000 vectors, top-100 search | 103.6 ms median |
+
+### macOS with CoreML (manifest v4: v3's vision tower on macOS)
+
+Runs [38968062311](https://github.com/arbaaz360/tessera-desktop/actions/runs/38968062311)
+and [38971746054](https://github.com/arbaaz360/tessera-desktop/actions/runs/38971746054),
+2026-10-16, same runner; ranges include runs 38953158750 and 38956260548.
+The search library is ready on the CPU at once and moves to CoreML when it
+has compiled (`search/README.md`).
+
+| Measure | Value |
+|---|---|
+| ready on the CPU, `PreferGpu` true | 3.4 to 6.3 s (second launch 2.2 to 2.3 s) |
+| first search answered, from the start of the load | 8.1 to 14.1 s, red first |
+| moved to CoreML | 261 to 330 s after ready; 125 to 145 s on a second launch, from the cache |
+| "a solid red square" on CoreML / CPU | red 0.1609 / 0.1612 first, then blue, then green |
+| vectors, CoreML against CPU (red, green, blue, sentence) | 1.00000, 1.00000, 1.00000, 0.99996 |
+| images per second (batch 8, 640x480), CoreML / CPU | 8.5 to 12.9 / 1.2 to 1.7 |
+| text per sentence (median of 10), CoreML / CPU | 9.5 to 15.2 / 125 to 147 ms |
+| Core ML alone loading the cached vision model (Swift) | 99 to 144 s, 48 to 56 s again, 79 to 97 s CPU-only |
+| CoreML cache | 2,590 MB; the compiled models hold their weights as text; 2.0 GB without the uncompiled packages, which still loads |
+| `dotnet test search` | 44 of 44; `GpuMatchesCpu` CoreML vs CPU: text 0.99986, image 1.00000 |
+| model download, macOS entries of manifest v4, no token | 559 MB in 6 to 10 s |
+
+Inside the published core (26 of 26 checks): ready line 2.1 s;
+`/api/search` answers 8.1 to 9.1 s after the process started, on the CPU; 51
+pictures scanned and thumbnailed in 2.4 s and all embedded 55 s later,
+most on the CPU while CoreML compiled; `/api/search/status` says
+`device: coreml` 209 to 274 s after start; `red.png` first at 0.160 with the index
+built on both devices; stdin closed to exit 368 ms.
 
 ## Not done
 
@@ -219,28 +258,11 @@ Run [38872561745](https://github.com/arbaaz360/tessera-desktop/actions/runs/3887
   is not implemented: a revoked key reverts to `free` at the next re-check.
 - The licence cache is not HMAC-protected (SRS 9.3 rule 5).
 - No deactivate command (SRS FR-47).
-- **CoreML does not load the model on macOS 26**, so a Mac embeds on the
-  CPU at about 1.5 images a second. Two causes, one behind the other, from
-  the CI probe ([run 38873830738](https://github.com/arbaaz360/tessera-desktop/actions/runs/38873830738)):
-
-  | Try | Core ML says |
-  |---|---|
-  | model as shipped (ONNX Runtime 1.24.4, and 1.31.0) | `Unable to parse ML Program: in operation /vision_model/embeddings/patch_embedding/Conv: Required param 'pad' is missing` |
-  | Conv padding spelled out (`tools/smoke/explicit_pads.py`) | `Failed to create MLModel … Input: pixel_values_fp16 has unbounded dimension which is not supported` |
-
-  The Conv says `auto_pad=VALID` with no `pads`; ONNX Runtime's CoreML
-  builder turns that into `pad_type="valid"` with no `pad` input, which this
-  Core ML rejects. Both models' batch dimension is the symbol `batch`, which
-  Core ML here will not take unbounded. Proposed fix, untested on a Mac:
-  `models/` writes `pads=[0,0,0,0]` instead of `auto_pad=VALID` in the export
-  (same output: identical vectors on Windows), and `search/` opens the
-  CoreML sessions with `SessionOptions.AddFreeDimensionOverrideByName("batch", n)`,
-  8 for vision (padding a short batch) and 1 for text. The smoke job's probe
-  now tests exactly that (`tools/smoke coreml`), but has not run: GitHub
-  stopped starting jobs on this account (billing, below).
-- `search/tests` `ModelStoreTests.EmbeddedManifestIsTheShippedOne` still
-  expects the model URLs under `arbaaz360/tessera-desktop`; the manifest
-  moved them to `arbaaz360/siglip2-base-onnx`. One string in `search/`.
+- **CoreML on a real Mac is unmeasured.** The runner's Core ML has no GPU
+  or Neural Engine for ML (every op on its CPU backend). There search
+  answers on the CPU within seconds, and CoreML takes over 261 s after the
+  first launch and 125 s after later ones, from a 2.6 GB cache
+  (`search/README.md`, Not done).
 - The DMG is unsigned. A Mac that downloads it quarantines it, and Gatekeeper
   refuses an unsigned app; testers can clear the flag with
   `xattr -dr com.apple.quarantine "/Applications/Tessera Desktop.app"`.
@@ -250,6 +272,5 @@ Run [38872561745](https://github.com/arbaaz360/tessera-desktop/actions/runs/3887
   will have to `codesign` the core's files before `tauri build`.
 - The window is 1280 points wide and the runner's screen 1024, so the
   launch screenshot shows it cut off on the left. Real Macs are wider.
-- GitHub Actions stopped starting jobs on 2026-10-16 ("recent account
-  payments have failed or your spending limit needs to be increased"). A
-  macOS minute counts ten times against a private repository's allowance.
+- ~~GitHub Actions stopped starting jobs on 2026-10-16 (billing).~~ The
+  repository is public since 2026-10-16 and Actions runs again.

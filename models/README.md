@@ -8,6 +8,7 @@ are a GitHub release.
 | File | What |
 |---|---|
 | `export_siglip2.py` | downloads the checkpoint, exports the two towers, verifies against PyTorch, writes the manifest and the test fixtures |
+| `coreml_compat.py` | what Core ML needs, onnx and numpy only: explicit Conv pads, float32 islands, an audit; `variants` writes the candidates the CI probe tries |
 | `rank_check.py` | ranks real photos with nine queries whose answers are known, and compares models with a baseline |
 | `manifest.json` | name, byte size, sha256 and download URL of every model file; embedded into `Tessera.Desktop.Search` as a resource |
 | `out/` | the export output (gitignored): `vision.onnx`, `text.onnx`, `tokenizer.model`, `manifest.json`, `verify.json`, `fixtures/` |
@@ -15,30 +16,38 @@ are a GitHub release.
 
 ## The published files
 
-Release [`models-siglip2-base-v2`](https://github.com/arbaaz360/siglip2-base-onnx/releases/tag/models-siglip2-base-v2)
-of the public, model-only repository
+Releases of the public, model-only repository
 [`arbaaz360/siglip2-base-onnx`](https://github.com/arbaaz360/siglip2-base-onnx)
-(decided by the owner 2026-10-16), so a buyer's app downloads with no token
-while this repository stays private. Its README carries the Apache-2.0
-attribution, the hashes and the list of changes.
+(decided by the owner 2026-10-16), so a buyer's app downloads with no token.
+Its README carries the Apache-2.0 attribution, the hashes and the list of
+changes. `models/manifest.json` (version 4) lists the vision tower once per
+platform, each from the release that published it:
 
-| File | Size | What |
-|---|---|---|
-| `vision.onnx` | 186 MB | `pixel_values [N,3,256,256] float32` → `image_embeds [N,768]`, L2-normalised; byte-identical to v1 |
-| `text.onnx` | 369 MB | `input_ids [N,64] int64` → `text_embeds [N,768]`, L2-normalised; token table int8 |
-| `tokenizer.model` | 4 MB | the Gemma SentencePiece model, copied from the checkpoint |
-| `manifest.json` | 2 KB | the same file as `models/manifest.json` |
+| File | Platforms | From release | Size | What |
+|---|---|---|---|---|
+| `vision.onnx` | Windows, Linux | [`v2`](https://github.com/arbaaz360/siglip2-base-onnx/releases/tag/models-siglip2-base-v2) | 186 MB | `pixel_values [batch,3,256,256] float32` → `image_embeds [batch,768]`, L2-normalised; float16 arithmetic |
+| `vision.onnx` | macOS | [`v3`](https://github.com/arbaaz360/siglip2-base-onnx/releases/tag/models-siglip2-base-v3) | 186 MB | the same, float32 arithmetic and explicit Conv pads, which Core ML needs (below) |
+| `text.onnx` | all | v3 (byte-identical to v2) | 369 MB | `input_ids [batch,64] int64` → `text_embeds [batch,768]`, L2-normalised; token table int8 |
+| `tokenizer.model` | all | v3 (byte-identical to v1, v2) | 4 MB | the Gemma SentencePiece model, copied from the checkpoint |
 
-559 MB in all, down from 755 MB in v1. Weights are float16 except the text
+The library narrows the manifest to its own platform
+(`ModelManifest.ForPlatform`), so a machine downloads and verifies three
+files. The manifest also records the input shapes, so the library knows
+the free dimension is `batch`. The two vision files agree to cosine
+0.9999946, so both platforms share one `modelId` and one kind of index.
+
+559 MB per platform, down from 755 MB in v1. Weights are float16 except the text
 tower's token table; inputs and outputs float32; opset 17, standard
 operators only. Normalisation is inside the graph, so a consumer never
 divides by a norm.
 
-`models-siglip2-base-v1` (755 MB, all float16) stays published: builds that
-shipped with the v1 manifest download it. v2 keeps the `modelId`
-`siglip2-base-patch16-256`, because the vision tower did not change: image
-vectors are identical, stored indexes stay valid, and an upgraded install
-downloads only the new `text.onnx`.
+`models-siglip2-base-v1` (755 MB, all float16), `-v2` and `-v3` stay
+published: builds that shipped with their manifests download them. Every
+manifest keeps the `modelId` `siglip2-base-patch16-256`: v2 changed only the
+text tower; v3 only the vision tower's arithmetic, and its image vectors
+agree with v2's to cosine ≥ 0.9999946 (the five fixtures, and 20 pictures:
+ten wallpapers and ten synthetic). An install on Windows upgrading from v2
+downloads nothing; a Mac downloads v3's `vision.onnx`.
 
 ## Run the export
 
@@ -59,10 +68,16 @@ models/.venv/Scripts/python models/rank_check.py --model v1=<folder with the v1 
 | `--vision-matmul int8w` | int8 weights for the vision MatMuls, rebuilt to float16 when the session loads; passes, not shipped (below) |
 | `--compare` | builds and verifies every variant, whatever is published |
 | `--reuse-fp32 --keep-fp32` | skip the slow torch export on a second run |
+| `--vision-compute fp32` | the default from v3: the vision tower computes in float32 from its float16 weights, the only way Core ML matches the CPU (below). `fp16` gives v2's arithmetic |
+| `--text-from FILE` | publish this `text.onnx` instead of the exported one, verified the same way: keeps a released tower byte for byte. Not needed for v3: the export reproduced v2's `text.onnx` exactly |
+| `--model-id ID` | the manifest's id when the image vectors moved |
 | `--variant fp16w` | float16 weights, float32 compute (bigger in RAM, no faster here, not shipped) |
 
-A vision change publishes under a new `modelId` (`…-q8`), because image
-vectors change and stored indexes would mix two spaces.
+A vision change that moves image vectors publishes under a new `modelId`
+(`…-q8`), because stored indexes would mix two spaces. The export decides:
+it compares the new fixture vectors with the shipped ones
+(`search/tests/…/fixtures/expected.json`) and keeps the shipped id only at
+cosine ≥ 0.99999; below that it stops and asks for `--model-id`.
 
 `rank_check.py` runs the nine ground-truth queries of the root README
 status section (exact strings, listed in the script with their accepted
@@ -77,13 +92,97 @@ app itself stored (exact for a text-only change; below).
 Then publish and refresh the embedded copy:
 
 ```bash
-gh release create models-siglip2-base-v2 -R arbaaz360/siglip2-base-onnx models/out/vision.onnx models/out/text.onnx models/out/tokenizer.model models/out/manifest.json
+gh release create models-siglip2-base-v3 -R arbaaz360/siglip2-base-onnx models/out/vision.onnx models/out/text.onnx models/out/tokenizer.model models/out/manifest.json
 cp models/out/manifest.json models/manifest.json
 cp models/out/fixtures/* search/tests/Tessera.Desktop.Search.Tests/fixtures/
 ```
 
+The version-4 manifest came from the same export with v2's vision file
+listed for Windows and Linux; no new release, its entries point at v2's and
+v3's assets:
+
+```bash
+gh release download models-siglip2-base-v2 -R arbaaz360/siglip2-base-onnx -p vision.onnx -D <dir>
+models/.venv/Scripts/python models/export_siglip2.py --reuse-fp32 --keep-fp32 --images <folder> --vision-from <dir>/vision.onnx --vision-from-release models-siglip2-base-v2
+```
+
+| Option | What |
+|---|---|
+| `--vision-from FILE` | list this released `vision.onnx` for `--vision-from-platforms` (default `windows,linux`); the exported one serves the rest. The export checks both give the fixtures' vectors to cosine 0.99999 |
+| `--vision-from-release TAG` | the release `--vision-from` was published in; its URL goes in the manifest |
+
 A new export is a new release tag there (`--release`) and a new `version` in
 the manifest; the library only ever trusts the hashes it was built with.
+
+## Core ML: model v3 (2026-10-16)
+
+v2 did not run on Core ML through ONNX Runtime's CoreML provider. Measured
+on GitHub's `macos-latest` runner (macOS 26, Apple silicon, 3 cores, a
+virtual machine), ONNX Runtime 1.24.4, ML Program format:
+
+| Cause | What Core ML said or did | Fix |
+|---|---|---|
+| the patch-embedding Conv had `auto_pad=VALID` and no `pads` | refused: `Required param 'pad' is missing`. The provider writes `pad_type="valid"` without the `pad` input this Core ML requires | the export writes `pads=[0,0,0,0]` (`coreml_compat.explicit_conv_pads`); same arithmetic |
+| the batch dimension `batch` is free | refused: `has unbounded dimension which is not supported` | the library fixes it by name (`AddFreeDimensionOverrideByName`, `search/README.md`); the manifest now records the name |
+| float16 arithmetic | loaded, but image vectors at cosine 0.983–0.994 against the CPU provider | the vision tower computes in float32 (`--vision-compute fp32`) |
+
+`coreml_compat.audit` checks every exported graph for the first two (and
+lists the ops the provider leaves to the CPU: `Tile`, `Expand`, `Mod`,
+`ReduceL2`, `ConstantOfShape` here, between four partitions); the export
+stops on implicit padding.
+
+### Why float32 arithmetic
+
+The CPU provider has almost no float16 kernels: it widens float16 weights
+to float32 when it loads them and computes in float32, so on the CPU a
+float16 graph behaves like a float32 one. Core ML runs an ML Program in the
+precision it is typed in. On the runner it ran on its CPU backend every
+time (ALL, CPUAndGPU and CPUOnly gave the same vectors to five decimals),
+in float16 throughout.
+
+SigLIP2's residual stream carries a few large values from layer 6 on: up to
+720 in the last layers (2 to 12 values above 256 per picture, `mean(x²)`
+up to 1,290 for a token), next to ordinary values near 1. In float16 the step
+between representable numbers near 700 is 0.5. The run that settled it
+([38947651278](https://github.com/arbaaz360/tessera-desktop/actions/runs/38947651278))
+put each region in float32 in turn (`coreml_compat.float32_islands`, weights
+still float16 in the file) and compared Core ML with the CPU on three
+swatches and thirteen generated pictures:
+
+| Vision graph on Core ML | Lowest cosine against the CPU | Swatches | Pictures |
+|---|---|---|---|
+| float16 arithmetic (v2 with explicit pads) | 0.98341 | 0.992–0.994 | 0.983–0.989 |
+| LayerNorm in float32 | 0.98338 | the same | the same |
+| attention in float32 | 0.98353 | the same | the same |
+| MLP in float32 | 0.99523 | 0.9999 | 0.995–0.999 |
+| **everything in float32 (v3)** | **1.00000** | 1.00000 | 1.00000 |
+
+The layer norms are not the problem (Core ML evidently keeps their
+statistics wide: a float16 variance would overflow at these values and give
+cosine 0.6, emulated in PyTorch), nor the attention. The MLP is most of it,
+the residual additions the rest, and only the whole graph in float32
+reaches the 0.999 the search smoke requires.
+
+What it costs, batch 8, 1600×1200 sources, two rounds each:
+
+| | v2 arithmetic | v3 |
+|---|---|---|
+| ONNX Runtime CPU, 8 threads, Core Ultra 7 265K | 10.3–10.5 img/s | 11.0–11.2 img/s |
+| DirectML, RTX 5060 Ti | 168–174 img/s | 100–101 img/s |
+| Core ML on the runner (CPU backend; 4 and 6 runs) | 14–28 img/s | 7.4–11.8 img/s |
+| `vision.onnx` | 186.10 MB | 186.15 MB |
+
+The CPU provider loses nothing (it computed in float32 already, minus some
+float16 round trips). DirectML loses 40% of its raw speed; the release
+build's whole pipeline was 26 pictures a second end to end (300 screenshots
+searchable in 11.5 s), so thumbnails, not embeddings, set the pace there.
+An integrated GPU, where float16 is twice float32, was not measured.
+
+The owner chose (2026-10-17) to keep DirectML at full speed: the manifest
+lists v2's vision file for Windows and Linux and v3's for macOS, one
+manifest for every build, narrowed by the library at run time. Windows
+measured again with v2's file through the store: DirectML 152–167 img/s at
+batch 8 over three rounds, the v2 rate.
 
 ## Cutting the download (2026-10-16)
 

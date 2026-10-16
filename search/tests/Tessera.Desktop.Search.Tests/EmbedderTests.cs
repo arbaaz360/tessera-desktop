@@ -37,6 +37,9 @@ public sealed class ModelFixture : IDisposable
             sw.Restart();
             Gpu = new SiglipEmbedder(gpuOptions, new ModelStore(gpuOptions), null, manifest);
             Gpu.LoadFromDirectory(TestPaths.ModelDir);
+            // On macOS the GPU embedder is ready on the CPU at once and moves to
+            // CoreML in the background; the tests want CoreML.
+            Gpu.DeviceUpgrade.Wait();
             GpuLoadMs = sw.Elapsed.TotalMilliseconds;
             if (Gpu.Device == EmbedDevice.Cpu)
             {
@@ -216,6 +219,111 @@ public class EmbedderTests : IClassFixture<ModelFixture>
         TestPaths.WriteNumbers("gpu-vs-cpu", new { device = _models.Gpu.Device.ToString(), text_min_cosine = worstText, image_min_cosine = worstImage });
         Assert.True(worstText >= 0.999f, $"text on {_models.Gpu.Device} drifts from CPU: {worstText}");
         Assert.True(worstImage >= 0.999f, $"images on {_models.Gpu.Device} drift from CPU: {worstImage}");
+    }
+
+    /// <summary>
+    /// CoreML's batching, run on the CPU: the vision session fixed at eight
+    /// images and the text session at one sentence, short batches padded,
+    /// long ones chunked. The vectors must be the dynamic sessions'.
+    /// </summary>
+    [Fact]
+    public void FixedBatchesMatchDynamicBatches()
+    {
+        var m = Model();
+        if (m is null) return;
+        var options = new SearchOptions { ModelsDir = Path.GetDirectoryName(TestPaths.ModelDir)!, PreferGpu = false };
+        using var fixedShapes = new SiglipEmbedder(options, new ModelStore(options), null, ModelManifest.Embedded()) { FixedShapesOnCpu = true };
+        fixedShapes.LoadFromDirectory(TestPaths.ModelDir!);
+        Assert.Null(m.FixedImageBatch);
+        Assert.Equal(SiglipEmbedder.CoreMlImageBatch, fixedShapes.FixedImageBatch);
+
+        var bitmaps = Enumerable.Range(0, 11).Select(i => Swatch((byte)(i * 23), (byte)(250 - i * 20), (byte)(40 + i * 17))).ToList();
+        try
+        {
+            float worst = 1;
+            foreach (int n in new[] { 1, 3, 8, 11 })
+            {
+                var batch = bitmaps.Take(n).ToList();
+                float[][] dynamic = m.EmbedImages(batch);
+                float[][] padded = fixedShapes.EmbedImages(batch);
+                Assert.Equal(n, padded.Length);
+                for (int i = 0; i < n; i++) worst = Math.Min(worst, Cosine(dynamic[i], padded[i]));
+            }
+            string[] sentences = ["a red square", "a photo of a mountain lake at sunrise", "RED"];
+            float[][] texts = fixedShapes.EmbedTexts(sentences);
+            float worstText = sentences.Select((s, i) => Cosine(m.EmbedText(s), texts[i])).Min();
+            _out.WriteLine($"fixed vs dynamic batches: image cosine min {worst:F6}, text cosine min {worstText:F6}");
+            Assert.True(worst >= 0.99999f, $"padded batches drift: {worst}");
+            Assert.True(worstText >= 0.99999f, $"one-sentence runs drift: {worstText}");
+        }
+        finally
+        {
+            foreach (var b in bitmaps) b.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The macOS move from the CPU to CoreML, run on any machine with a second
+    /// set of CPU sessions: ready at once, embeds keep working while the
+    /// second set loads and is swapped in, and the vectors do not move.
+    /// </summary>
+    [Fact]
+    public async Task SwapsSessionsWhileEmbedsRun()
+    {
+        var m = Model();
+        if (m is null) return;
+        using var bmp = Swatch(200, 40, 40);
+        float[] image = m.EmbedImage(bmp);
+        float[] text = m.EmbedText("a solid red square");
+
+        var options = new SearchOptions { ModelsDir = Path.GetDirectoryName(TestPaths.ModelDir)!, PreferGpu = false };
+        using var e = new SiglipEmbedder(options, new ModelStore(options), null, ModelManifest.Embedded()) { UpgradeOnCpuForTests = true };
+        var sw = Stopwatch.StartNew();
+        e.LoadFromDirectory(TestPaths.ModelDir!);
+        double readyMs = sw.Elapsed.TotalMilliseconds;
+        Assert.True(e.IsReady);
+        Assert.Null(e.FixedImageBatch);
+
+        float worst = 1;
+        int calls = 0;
+        var workers = Enumerable.Range(0, 3).Select(w => Task.Run(() =>
+        {
+            int n = 0;
+            while (!e.DeviceUpgrade.IsCompleted || n < 2)
+            {
+                float c = w % 2 == 0 ? Cosine(e.EmbedImage(bmp), image) : Cosine(e.EmbedText("a solid red square"), text);
+                lock (WorkersLock) worst = Math.Min(worst, c);
+                n++;
+            }
+            Interlocked.Add(ref calls, n);
+        })).ToArray();
+        await e.DeviceUpgrade;
+        await Task.WhenAll(workers);
+
+        _out.WriteLine($"ready in {readyMs:F0} ms, swapped {e.DeviceUpgradeTime?.TotalMilliseconds:F0} ms later; {calls} calls across the swap, cosine min {worst:F6}");
+        Assert.Equal(SiglipEmbedder.CoreMlImageBatch, e.FixedImageBatch);
+        Assert.NotNull(e.DeviceUpgradeTime);
+        Assert.True(worst >= 0.99999f, $"vectors moved across the swap: {worst}");
+        Assert.True(Cosine(e.EmbedImage(bmp), image) >= 0.99999f);
+    }
+
+    private static readonly object WorkersLock = new();
+
+    /// <summary>The manifest names the graphs' free batch dimension, which CoreML fixes by name.</summary>
+    [Fact]
+    public void ManifestNamesTheGraphsBatchDimension()
+    {
+        if (TestPaths.ModelDir is null) { _out.WriteLine("skipped: no local model export"); return; }
+        var manifest = ModelManifest.Embedded();
+        foreach (var (file, input) in new[] { ("vision.onnx", manifest.Inputs.Vision), ("text.onnx", manifest.Inputs.Text) })
+        {
+            using var so = new Microsoft.ML.OnnxRuntime.SessionOptions { GraphOptimizationLevel = Microsoft.ML.OnnxRuntime.GraphOptimizationLevel.ORT_DISABLE_ALL };
+            using var session = new Microsoft.ML.OnnxRuntime.InferenceSession(Path.Combine(TestPaths.ModelDir, file), so);
+            Assert.True(session.InputMetadata.ContainsKey(input.Name), $"{file} has no input {input.Name}");
+            string dim = session.InputMetadata[input.Name].SymbolicDimensions[0];
+            _out.WriteLine($"{file}: {input.Name} batch dimension '{dim}', manifest '{input.BatchDimension}'");
+            Assert.Equal(input.BatchDimension, dim);
+        }
     }
 
     [Fact]

@@ -22,6 +22,24 @@ Two size options, each measured on its own (see models/README.md):
                           quantised per call). A new modelId, because image
                           vectors change and stored indexes go stale.
 
+Core ML (macOS) needs three things the plain export lacks, all from
+models/coreml_compat.py (model v3):
+
+    explicit zero `pads` on the patch-embedding Conv instead of
+    `auto_pad=VALID`, which Core ML refuses;
+    --vision-compute fp32 (the default): the vision tower computes in
+    float32 from its float16 weights. Core ML runs a float16 graph in
+    float16 throughout and lands at cosine 0.983 against the CPU; in
+    float32 it lands at 1.00000;
+    the input shapes in the manifest, so the library can fix the batch
+    dimension by name.
+
+Float32 arithmetic costs DirectML 40% (models/README.md), so from manifest
+version 4 a file may be listed per platform: --vision-from names an earlier
+release's vision.onnx for some platforms (Windows and Linux keep v2's), the
+exported one serves the rest (macOS). Both must give the fixtures' vectors
+to cosine 0.99999, since they share the modelId.
+
 Also written to the output dir:
 
     tokenizer.model   the Gemma SentencePiece model, copied from the checkpoint
@@ -61,8 +79,9 @@ import torch.nn.functional as F
 
 HF_MODEL = "google/siglip2-base-patch16-256"
 MODEL_ID = "siglip2-base-patch16-256"
-RELEASE_TAG = "models-siglip2-base-v2"
-MANIFEST_VERSION = 2
+RELEASE_TAG = "models-siglip2-base-v3"
+MANIFEST_VERSION = 4
+PLATFORMS = ("windows", "macos", "linux")
 # Public, model-only repository: buyers download with no token (owner, 2026-10-16).
 REPO = "arbaaz360/siglip2-base-onnx"
 OPSET = 17
@@ -72,6 +91,11 @@ DIMS = 768
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "out"
+SHIPPED_MANIFEST = HERE / "manifest.json"
+SHIPPED_FIXTURES = HERE.parent / "search" / "tests" / "Tessera.Desktop.Search.Tests" / "fixtures" / "expected.json"
+# Image vectors that agree with the shipped model's at least this well keep
+# its modelId: stored indexes stay valid.
+SAME_SPACE_COSINE = 0.99999
 
 
 # --------------------------------------------------------------------------
@@ -494,6 +518,21 @@ def main() -> int:
     ap.add_argument("--compare", action="store_true",
                     help="build and verify every variant, whatever is published")
     ap.add_argument("--release", default=RELEASE_TAG, help="release tag the manifest URLs name")
+    ap.add_argument("--vision-compute", choices=["fp16", "fp32"], default="fp32",
+                    help="fp32 (from v3): the float16 vision graph computes in float32, weights stay "
+                         "float16 in the file; Core ML matches the CPU only this way")
+    ap.add_argument("--text-from", type=Path, default=None,
+                    help="publish this text.onnx instead of the one exported here (verified the same "
+                         "way); keeps a released text tower byte for byte")
+    ap.add_argument("--vision-from", type=Path, default=None,
+                    help="a released vision.onnx to list for --vision-from-platforms instead of the "
+                         "exported one; the exported one is listed for the other platforms")
+    ap.add_argument("--vision-from-release", default=None, help="the release tag --vision-from was published in")
+    ap.add_argument("--vision-from-platforms", default="windows,linux",
+                    help=f"comma-separated, of {', '.join(PLATFORMS)}")
+    ap.add_argument("--model-id", default=None,
+                    help="the manifest's modelId; by default the shipped one when the image vectors "
+                         f"agree with its fixtures to cosine >= {SAME_SPACE_COSINE}, else the export fails")
     args = ap.parse_args()
 
     out: Path = args.out
@@ -548,9 +587,15 @@ def main() -> int:
                          {"input_ids": {0: "batch"}, "text_embeds": {0: "batch"}})
 
     import onnx
+    sys.path.insert(0, str(HERE))
+    from coreml_compat import audit, explicit_conv_pads, float32_islands
 
     for p in (vision_fp32, text_fp32):
         m = onnx.load(str(p))
+        changed = explicit_conv_pads(m)
+        if changed:
+            onnx.save(m, str(p))
+            log(f"{p.name}: " + "; ".join(changed))
         onnx.checker.check_model(m)
         log(f"{p.name}: opset {[o.version for o in m.opset_import if o.domain in ('', 'ai.onnx')]}, "
             f"{p.stat().st_size / 1e6:.1f} MB, {len(m.graph.node)} nodes")
@@ -594,11 +639,27 @@ def main() -> int:
         log(f"int8weights: vision {vw.stat().st_size / 1e6:.1f} MB; {weight_stats['matmuls']} MatMuls, "
             f"column cosine min {weight_stats['column_cosine_min']:.5f}")
     publish_v = base_v
+    if args.vision_compute == "fp32":
+        if args.variant != "fp16" or args.vision_matmul != "fp16":
+            raise SystemExit("--vision-compute fp32 applies to the float16 vision graph (--variant fp16)")
+        v32 = out / "vision.fp32compute.onnx"
+        m = onnx.load(str(base_v))
+        moved = float32_islands(m, lambda n: True)
+        onnx.save(m, str(v32))
+        quantised["fp32compute"] = (v32, base_t)
+        publish_v = v32
+        log(f"fp32compute: {moved} vision nodes in float32, weights float16; {v32.stat().st_size / 1e6:.1f} MB")
     if args.vision_matmul == "int8":
         publish_v = quantised["int8matmul_pc" if args.per_channel else "int8matmul"][0]
     elif args.vision_matmul == "int8w":
         publish_v = quantised["int8weights"][0]
     publish_t = quantised["int8table"][1] if args.text_table == "int8" else base_t
+    if args.text_from:
+        kept = out / "text.kept.onnx"
+        shutil.copyfile(args.text_from, kept)
+        quantised["kept_text"] = (base_v, kept)
+        publish_t = kept
+        log(f"text tower: {args.text_from} ({sha256_of(kept)[:16]}…) instead of the export")
 
     # ---- verification inputs ---------------------------------------------
     images = synthetic_images()
@@ -700,6 +761,16 @@ def main() -> int:
     shutil.copyfile(publish_t, out / "text.onnx")
     log(f"published: {publish_v.name} as vision.onnx, {publish_t.name} as text.onnx")
     shutil.copyfile(snap / "tokenizer.model", out / "tokenizer.model")
+    findings = {}
+    for name in ("vision.onnx", "text.onnx"):
+        findings[name] = audit(onnx.load(str(out / name), load_external_data=False))
+        for line in findings[name]:
+            log(f"coreml audit {name}: {line}")
+        implicit = [line for line in findings[name] if "implicit padding" in line or "has auto_pad" in line]
+        if implicit:
+            raise SystemExit(f"{name}: Core ML refuses implicit padding: {implicit}")
+    verify["coreml_audit"] = findings
+    (out / "verify.json").write_text(json.dumps(verify, indent=2))
     if not args.keep_fp32:
         vision_fp32.unlink(missing_ok=True)
         text_fp32.unlink(missing_ok=True)
@@ -727,18 +798,85 @@ def main() -> int:
         "texts": [{"text": s, "inputIds": [int(x) for x in i], "embedding": [float(x) for x in e]}
                   for s, i, e in zip(fsent, fids, ftxt)],
     }
+    # ---- the shipped model's vectors on the same fixtures -------------------
+    # Same pictures, same preprocessing, same runtime: what changes is the
+    # graph. Agreement at SAME_SPACE_COSINE keeps the modelId, so stored
+    # indexes stay valid; below it the vectors are a new space.
+    shipped = json.loads(SHIPPED_MANIFEST.read_text()) if SHIPPED_MANIFEST.exists() else None
+    model_id = args.model_id
+    if SHIPPED_FIXTURES.exists() and shipped:
+        before = json.loads(SHIPPED_FIXTURES.read_text())
+        old_img = {f["file"]: np.array(f["embedding"], np.float32) for f in before["images"]}
+        old_txt = {t["text"]: np.array(t["embedding"], np.float32) for t in before["texts"]}
+        img_cos = {f"{n}.png": float(cosine(e.astype(np.float32), old_img[f"{n}.png"]))
+                   for (n, _), e in zip(fixture_images, femb) if f"{n}.png" in old_img}
+        txt_cos = [float(cosine(e.astype(np.float32), old_txt[t])) for t, e in zip(fsent, ftxt) if t in old_txt]
+        verify["against_shipped"] = {"release": shipped.get("release"), "modelId": shipped["modelId"],
+                                     "image_cosines": img_cos, "image_cosine_min": min(img_cos.values()),
+                                     "text_cosine_min": min(txt_cos)}
+        log(f"against {shipped.get('release')}: image cosine min {min(img_cos.values()):.7f} "
+            f"({', '.join(f'{k} {v:.7f}' for k, v in img_cos.items())}); text cosine min {min(txt_cos):.7f}")
+        same_space = min(img_cos.values()) >= SAME_SPACE_COSINE
+        if model_id is None and args.vision_matmul == "fp16":
+            if not same_space:
+                raise SystemExit(f"image vectors moved (cosine {min(img_cos.values()):.7f} < {SAME_SPACE_COSINE}) "
+                                 f"against {shipped.get('release')}: pass --model-id with a new id")
+            model_id = shipped["modelId"]
+        (out / "verify.json").write_text(json.dumps(verify, indent=2))
+    if model_id is None:
+        # Image vectors change only when the vision tower does; a new id makes
+        # the core rebuild every stored index instead of mixing two spaces.
+        model_id = MODEL_ID + ("-q8" if args.vision_matmul != "fp16" else "")
+
+    # ---- a released vision tower for some platforms ---------------------------
+    from_platforms: list[str] = []
+    if args.vision_from:
+        if not args.vision_from_release:
+            raise SystemExit("--vision-from needs --vision-from-release")
+        from_platforms = [x.strip() for x in args.vision_from_platforms.split(",") if x.strip()]
+        if not from_platforms or any(x not in PLATFORMS for x in from_platforms) or set(from_platforms) == set(PLATFORMS):
+            raise SystemExit(f"--vision-from-platforms must name some, not all, of {PLATFORMS}")
+        so = ort_session(args.vision_from)
+        sin = so.get_inputs()[0]
+        if sin.name != vin.name or sin.shape != vin.shape:
+            raise SystemExit(f"{args.vision_from}: input {sin.name} {sin.shape}, the export's is {vin.name} {vin.shape}")
+        other = so.run(None, {sin.name: fpix.astype(np.float16 if "float16" in sin.type else np.float32)})[0]
+        pair = {f"{n}.png": float(cosine(a.astype(np.float32), b.astype(np.float32)))
+                for (n, _), a, b in zip(fixture_images, femb, other)}
+        verify["platform_vision"] = {"file": str(args.vision_from), "release": args.vision_from_release,
+                                     "platforms": from_platforms, "sha256": sha256_of(args.vision_from),
+                                     "image_cosines_vs_export": pair, "image_cosine_min": min(pair.values())}
+        (out / "verify.json").write_text(json.dumps(verify, indent=2))
+        log(f"vision for {','.join(from_platforms)}: {args.vision_from.name} from {args.vision_from_release}; "
+            f"fixtures against the exported vision: cosine min {min(pair.values()):.7f}")
+        if min(pair.values()) < SAME_SPACE_COSINE:
+            raise SystemExit("the two vision towers disagree; they cannot share a modelId")
+
     (fx / "expected.json").write_text(json.dumps(fixtures))
     log(f"fixtures: {len(fixture_images)} images, {len(fsent)} sentences -> {fx}")
 
     # ---- manifest ----------------------------------------------------------
     files = []
+    if args.vision_from:
+        files.append({
+            "name": "vision.onnx", "platforms": from_platforms,
+            "bytes": args.vision_from.stat().st_size, "sha256": sha256_of(args.vision_from),
+            "url": f"https://github.com/{REPO}/releases/download/{args.vision_from_release}/vision.onnx",
+        })
     for name in ("vision.onnx", "text.onnx", "tokenizer.model"):
         p = out / name
-        files.append({
-            "name": name, "bytes": p.stat().st_size, "sha256": sha256_of(p),
+        entry = {"name": name}
+        if name == "vision.onnx" and from_platforms:
+            entry["platforms"] = [x for x in PLATFORMS if x not in from_platforms]
+        entry.update({
+            "bytes": p.stat().st_size, "sha256": sha256_of(p),
             "url": f"https://github.com/{REPO}/releases/download/{args.release}/{name}",
         })
+        files.append(entry)
     weights = "float16" if args.variant == "fp16" else "float16-weights-float32-compute"
+    if args.vision_compute == "fp32":
+        weights += ("; vision computes in float32 on " + ", ".join(x for x in PLATFORMS if x not in from_platforms)
+                    + f" (float16 on {', '.join(from_platforms)})" if from_platforms else "; vision computes in float32")
     if args.text_table == "int8":
         weights += "; text token table int8, per-row scale"
     if args.vision_matmul == "int8":
@@ -746,9 +884,7 @@ def main() -> int:
     elif args.vision_matmul == "int8w":
         weights += "; vision MatMul weights int8, per-column scale"
     manifest = {
-        # Image vectors change only when the vision tower does; a new id makes
-        # the core rebuild every stored index instead of mixing two spaces.
-        "modelId": MODEL_ID + ("-q8" if args.vision_matmul != "fp16" else ""),
+        "modelId": model_id,
         "version": MANIFEST_VERSION,
         "source": HF_MODEL,
         "licence": "Apache-2.0",
@@ -757,16 +893,19 @@ def main() -> int:
         "imageSize": IMAGE_SIZE,
         "textLength": TEXT_LEN,
         "weights": weights,
-        "inputs": {"vision": {"name": vin.name, "type": vin.type},
-                   "text": {"name": tin.name, "type": tin.type}},
+        # Shapes as the graphs declare them; the library fixes the free batch
+        # dimension by this name for CoreML.
+        "inputs": {"vision": {"name": vin.name, "type": vin.type, "shape": vin.shape},
+                   "text": {"name": tin.name, "type": tin.type, "shape": tin.shape}},
         "tokenizer": tokenizer_facts,
         "files": files,
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    total = sum(f["bytes"] for f in files)
-    log(f"manifest written; download size {total / 1e6:.1f} MB")
+    for platform in PLATFORMS:
+        mine = [f for f in files if platform in f.get("platforms", PLATFORMS)]
+        log(f"manifest written; download on {platform}: {sum(f['bytes'] for f in mine) / 1e6:.1f} MB")
     for f in files:
-        log(f"  {f['name']:16} {f['bytes'] / 1e6:8.1f} MB  {f['sha256'][:16]}…")
+        log(f"  {f['name']:16} {f['bytes'] / 1e6:8.1f} MB  {f['sha256'][:16]}  {','.join(f.get('platforms', ['all']))}")
     return 0
 
 

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Numerics.Tensors;
 using Microsoft.Extensions.Logging;
 using Microsoft.ML.OnnxRuntime;
@@ -68,8 +69,14 @@ internal static class SearchSmoke
 
     /// <param name="loadFrom">
     /// A folder holding vision.onnx, text.onnx and tokenizer.model to load as
-    /// they are, without the manifest's hashes: how the CoreML probe tries a
-    /// rewritten model. Null loads through the store, as the core does.
+    /// they are, without the manifest's hashes. Null loads through the store,
+    /// as the core does.
+    /// </param>
+    /// <param name="requireGpu">
+    /// PreferGpu=true must land on this platform's GPU provider: CoreML on
+    /// macOS, DirectML on Windows. On CoreML the compiled-model cache is
+    /// cleared first, so the first load is a buyer's first launch and a
+    /// second embedder shows the warm start.
     /// </param>
     public static async Task<int> RunAsync(string modelsDir, bool requireGpu, string? loadFrom)
     {
@@ -79,81 +86,150 @@ internal static class SearchSmoke
         var manifest = ModelManifest.Embedded();
         using var logs = Logs();
         using var store = new ModelStore(Options(modelsDir, manifest, false), null, logs.CreateLogger<ModelStore>());
-        report.Number("model", manifest.ModelId);
+        report.Number("model", $"{manifest.ModelId}, vision.onnx {manifest.File("vision.onnx").Sha256[..16]} for {manifest.Platform}");
+        var expected = OperatingSystem.IsMacOS() ? EmbedDevice.CoreML : EmbedDevice.DirectML;
 
-        // Vectors of the 3 swatches and the sentence, per device, to compare.
-        var vectors = new Dictionary<bool, float[][]>();
-        foreach (var preferGpu in new[] { true, false })
+        if (requireGpu && OperatingSystem.IsMacOS())
         {
-            var label = preferGpu ? "PreferGpu=true" : "PreferGpu=false";
-            try
+            var cache = Path.Combine(loadFrom ?? store.DirectoryFor(manifest.ModelId), "coreml");
+            if (Directory.Exists(cache))
             {
-                vectors[preferGpu] = await MeasureAsync(report, label, preferGpu, requireGpu, loadFrom,
-                    new SiglipEmbedder(Options(modelsDir, manifest, preferGpu), store, logs.CreateLogger<SiglipEmbedder>(), manifest));
-            }
-            catch (Exception e)
-            {
-                report.Check(false, $"{label}: load and embed", e.ToString());
+                Directory.Delete(cache, recursive: true);
+                Report.Line($"cleared {cache}: the first load compiles, as on a buyer's first launch");
             }
         }
 
-        if (vectors.Count == 2)
+        // Red, green, blue and the sentence, per phase, to compare.
+        var vectors = new Dictionary<string, float[][]>();
+        try
         {
-            var agreement = Enumerable.Range(0, vectors[true].Length)
-                .Select(i => TensorPrimitives.CosineSimilarity(vectors[true][i], vectors[false][i])).Min();
-            report.Number("GPU vs CPU vectors, lowest cosine (3 swatches + sentence)", agreement, "", 5);
-            report.Check(agreement > 0.98, "GPU and CPU vectors agree (cosine > 0.98)", $"{agreement:F5}");
+            // PreferGpu: ready at once (the CPU on macOS), a first search right
+            // away, then the move to the GPU provider in the background.
+            using var gpu = new SiglipEmbedder(Options(modelsDir, manifest, true), store, logs.CreateLogger<SiglipEmbedder>(), manifest);
+            var sw = Stopwatch.StartNew();
+            await LoadAsync(gpu, loadFrom, new Printer());
+            var readySeconds = sw.Elapsed.TotalSeconds;
+            report.Number("PreferGpu=true: ready (verify + sessions)", readySeconds, "s");
+            report.Number("PreferGpu=true: Device when ready", Describe(gpu));
+            vectors["ready"] = Rank(report, $"PreferGpu=true, first search on {gpu.Device}", gpu);
+            var firstSearch = sw.Elapsed.TotalSeconds;
+            report.Number("PreferGpu=true: first search answered, from the start of the load", firstSearch, "s");
+            if (requireGpu && OperatingSystem.IsMacOS())
+            {
+                report.Check(gpu.Device == EmbedDevice.Cpu && firstSearch < 30, "search answers on the CPU within 30 s, before CoreML",
+                    $"{firstSearch:F1} s on {gpu.Device}");
+            }
+
+            if (!gpu.DeviceUpgrade.IsCompleted)
+            {
+                await gpu.DeviceUpgrade.WaitAsync(TimeSpan.FromMinutes(20));
+            }
+
+            report.Number($"PreferGpu=true: moved to {gpu.Device}",
+                gpu.DeviceUpgradeTime is { } t ? $"{t.TotalSeconds:F1} s after ready ({readySeconds + t.TotalSeconds:F1} s after the start)" : "no move");
+            report.Number("PreferGpu=true: Device", Describe(gpu));
+            if (requireGpu)
+            {
+                report.Check(gpu.Device == expected, $"PreferGpu=true ends on {expected}", $"Device = {gpu.Device}; the log above says why if it stayed");
+            }
+
+            vectors["gpu"] = Measure(report, $"PreferGpu=true, on {gpu.Device}", gpu);
+        }
+        catch (Exception e)
+        {
+            report.Check(false, "PreferGpu=true: load and embed", e.ToString());
+        }
+
+        try
+        {
+            using var cpu = new SiglipEmbedder(Options(modelsDir, manifest, false), store, logs.CreateLogger<SiglipEmbedder>(), manifest);
+            var sw = Stopwatch.StartNew();
+            await LoadAsync(cpu, loadFrom, null);
+            report.Number("PreferGpu=false: ready (verify + sessions)", sw.Elapsed.TotalSeconds, "s");
+            report.Number("PreferGpu=false: Device", Describe(cpu));
+            vectors["cpu"] = Measure(report, "PreferGpu=false", cpu);
+        }
+        catch (Exception e)
+        {
+            report.Check(false, "PreferGpu=false: load and embed", e.ToString());
+        }
+
+        foreach (var (a, b, what) in new[] { ("gpu", "cpu", "GPU and CPU"), ("ready", "gpu", "first search and after the move") })
+        {
+            if (vectors.TryGetValue(a, out var x) && vectors.TryGetValue(b, out var y))
+            {
+                var cosines = x.Select((v, i) => (double)TensorPrimitives.CosineSimilarity(v, y[i])).ToArray();
+                report.Number($"{what}: vectors, cosine (red, green, blue, sentence)", string.Join(", ", cosines.Select(c => c.ToString("F5", CultureInfo.InvariantCulture))));
+                report.Check(cosines.Min() >= 0.999, $"{what}: vectors agree (cosine >= 0.999)", $"{cosines.Min():F5}");
+            }
+        }
+
+        if (requireGpu && OperatingSystem.IsMacOS())
+        {
+            // A second launch: ready on the CPU again, CoreML now from the cache.
+            using var warm = new SiglipEmbedder(Options(modelsDir, manifest, true), store, logs.CreateLogger<SiglipEmbedder>(), manifest);
+            var sw = Stopwatch.StartNew();
+            await LoadAsync(warm, loadFrom, null);
+            report.Number("second launch: ready", sw.Elapsed.TotalSeconds, "s");
+            await warm.DeviceUpgrade.WaitAsync(TimeSpan.FromMinutes(20));
+            report.Number("second launch: moved to CoreML from the cache", sw.Elapsed.TotalSeconds, "s");
+            report.Check(warm.Device == EmbedDevice.CoreML, "the second launch moves to CoreML too", $"{warm.Device}");
+            var cache = Path.Combine(warm.ModelDirectory!, "coreml");
+            var files = Directory.Exists(cache) ? Directory.GetFiles(cache, "*", SearchOption.AllDirectories) : [];
+            report.Number("CoreML cache", $"{files.Length} files, {files.Sum(f => new FileInfo(f).Length) / 1048576.0:F0} MB in "
+                + string.Join(", ", Directory.Exists(cache) ? Directory.GetDirectories(cache).Select(Path.GetFileName) : []));
         }
 
         return report.Finish();
     }
 
-    private static async Task<float[][]> MeasureAsync(
-        Report report, string label, bool preferGpu, bool requireGpu, string? loadFrom, SiglipEmbedder embedder)
+    private static async Task LoadAsync(SiglipEmbedder embedder, string? loadFrom, IProgress<ModelDownloadProgress>? progress)
     {
-        using var owned = embedder;
+        if (loadFrom is null)
+        {
+            await embedder.EnsureReadyAsync(progress, CancellationToken.None);
+        }
+        else
+        {
+            embedder.LoadFromDirectory(loadFrom);
+        }
+    }
+
+    private static string Describe(SiglipEmbedder embedder) =>
+        (embedder.Device?.ToString() ?? "none") + (embedder.DeviceName is { } n ? $" ({n})" : "")
+        + (embedder.FixedImageBatch is { } b ? $", batch fixed at {b}" : "");
+
+    /// <summary>"a solid red square" against red, green and blue swatches; the red one must win. Returns the 3 image vectors and the sentence's.</summary>
+    private static float[][] Rank(Report report, string label, SiglipEmbedder embedder)
+    {
         using var red = Images.Solid(new SKColor(255, 0, 0), 256, 256);
         using var green = Images.Solid(new SKColor(0, 255, 0), 256, 256);
         using var blue = Images.Solid(new SKColor(0, 0, 255), 256, 256);
+        var sw = Stopwatch.StartNew();
+        var images = embedder.EmbedImages([red, green, blue]);
+        var imageMs = sw.Elapsed.TotalMilliseconds;
+        sw.Restart();
+        var text = embedder.EmbedText(Query);
+        var textMs = sw.Elapsed.TotalMilliseconds;
+        var scores = images.Select(v => TensorPrimitives.Dot(v, text)).ToArray();
+        var ranking = string.Join(" > ", Enumerable.Range(0, 3).OrderByDescending(i => scores[i])
+            .Select(i => $"{Names[i]} {scores[i]:F4}"));
+        report.Number($"{label}: \"{Query}\"", ranking);
+        report.Check(Array.IndexOf(scores, scores.Max()) == 0, $"{label}: the red swatch ranks first", ranking);
+        report.Number($"{label}: 3 swatches / 1 sentence", $"{imageMs:F0} ms / {textMs:F0} ms");
+        return [.. images, text];
+    }
+
+    /// <summary>The ranking, then images per second and text milliseconds.</summary>
+    private static float[][] Measure(Report report, string label, SiglipEmbedder embedder)
+    {
+        var vectors = Rank(report, label, embedder);
         var batch = Enumerable.Range(0, Batch).Select(i => Images.Picture(100 + i, 640, 480)).ToList();
         try
         {
-            var sw = Stopwatch.StartNew();
-            if (loadFrom is null)
-            {
-                await embedder.EnsureReadyAsync(new Printer(), CancellationToken.None);
-            }
-            else
-            {
-                embedder.LoadFromDirectory(loadFrom);
-            }
-
-            var device = embedder.Device?.ToString() ?? "none";
-            report.Number($"{label}: Device", device + (embedder.DeviceName is { } n ? $" ({n})" : ""));
-            report.Number($"{label}: load (verify + sessions)", sw.Elapsed.TotalSeconds, "s");
-            if (preferGpu && requireGpu)
-            {
-                report.Check(embedder.Device is not null and not EmbedDevice.Cpu,
-                    $"{label} chose a GPU provider", $"Device = {device}; the log above says why if it fell back");
-            }
-
-            // Red, green, blue and the sentence.
-            sw.Restart();
-            var images = embedder.EmbedImages([red, green, blue]);
-            var firstImageMs = sw.Elapsed.TotalMilliseconds;
-            sw.Restart();
-            var text = embedder.EmbedText(Query);
-            var firstTextMs = sw.Elapsed.TotalMilliseconds;
-            var scores = images.Select(v => TensorPrimitives.Dot(v, text)).ToArray();
-            var ranking = string.Join(" > ", Enumerable.Range(0, 3).OrderByDescending(i => scores[i])
-                .Select(i => $"{Names[i]} {scores[i]:F4}"));
-            report.Number($"{label}: \"{Query}\"", ranking);
-            report.Check(Array.IndexOf(scores, scores.Max()) == 0, $"{label}: the red swatch ranks first", ranking);
-            report.Number($"{label}: first call (3 swatches / 1 sentence)", $"{firstImageMs:F0} ms / {firstTextMs:F0} ms");
-
             // Throughput, after the first call has paid for any lazy setup.
             embedder.EmbedImages(batch);
-            sw.Restart();
+            var sw = Stopwatch.StartNew();
             for (var k = 0; k < Batches; k++)
             {
                 embedder.EmbedImages(batch);
@@ -172,7 +248,7 @@ internal static class SearchSmoke
 
             times.Sort();
             report.Number($"{label}: text, median of {times.Count}", times[times.Count / 2], "ms");
-            return [.. images, text];
+            return vectors;
         }
         finally
         {

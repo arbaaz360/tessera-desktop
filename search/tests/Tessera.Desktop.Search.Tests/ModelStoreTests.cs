@@ -209,23 +209,88 @@ public class ModelStoreTests : IDisposable
     [Fact]
     public void EmbeddedManifestIsTheShippedOne()
     {
-        var m = ModelManifest.Embedded();
-        // v2 changed only the text tower, so image vectors and stored indexes stay valid under the same id.
-        Assert.Equal("siglip2-base-patch16-256", m.ModelId);
-        Assert.Equal(2, m.Version);
-        Assert.Equal("models-siglip2-base-v2", m.Release);
-        Assert.Equal(768, m.Dimensions);
-        Assert.Equal(256, m.ImageSize);
-        Assert.Equal(64, m.Tokenizer.MaxLength);
-        Assert.Equal(new[] { "vision.onnx", "text.onnx", "tokenizer.model" }, m.Files.Select(f => f.Name));
-        Assert.All(m.Files, f =>
+        var published = ModelManifest.EmbeddedAsPublished();
+        // v2 changed only the text tower, v3 only the vision tower's padding and
+        // arithmetic, and v4 lists a vision tower per platform; image vectors
+        // agree to 0.99999 throughout, so stored indexes stay valid under one id.
+        Assert.Equal("siglip2-base-patch16-256", published.ModelId);
+        Assert.Equal(4, published.Version);
+        Assert.Null(published.Platform);
+        // CoreML fixes the batch dimension by the name the graphs give it.
+        Assert.Equal("batch", published.Inputs.Vision.BatchDimension);
+        Assert.Equal("batch", published.Inputs.Text.BatchDimension);
+        Assert.Equal("pixel_values", published.Inputs.Vision.Name);
+        Assert.Equal("input_ids", published.Inputs.Text.Name);
+        Assert.Equal(768, published.Dimensions);
+        Assert.Equal(256, published.ImageSize);
+        Assert.Equal(64, published.Tokenizer.MaxLength);
+        Assert.Equal(new[] { "vision.onnx", "vision.onnx", "text.onnx", "tokenizer.model" }, published.Files.Select(f => f.Name));
+        Assert.All(published.Files, f =>
         {
             Assert.Equal(64, f.Sha256.Length);
             Assert.True(f.Bytes > 0);
             // The public, model-only repository: a buyer downloads with no token.
-            Assert.Equal($"https://github.com/arbaaz360/siglip2-base-onnx/releases/download/{m.Release}/{f.Name}", f.Url);
+            Assert.Matches($"^https://github\\.com/arbaaz360/siglip2-base-onnx/releases/download/models-siglip2-base-v[23]/{f.Name}$", f.Url);
         });
-        // v1 was 755 MB; the int8 token table took 196 MB off the text tower.
-        Assert.InRange(m.TotalBytes, 500_000_000, 600_000_000);
+
+        // Windows keeps v2's vision tower (float16 arithmetic, fast on DirectML);
+        // macOS takes v3's (float32 arithmetic, which Core ML needs).
+        var windows = published.ForPlatform("windows");
+        var macos = published.ForPlatform("macos");
+        Assert.Equal("ae478837056f3038d6793d4eb6450f4eacc8fc3b38711a4cd1d899af3f4747c7", windows.File("vision.onnx").Sha256);
+        Assert.EndsWith("/models-siglip2-base-v2/vision.onnx", windows.File("vision.onnx").Url, StringComparison.Ordinal);
+        Assert.Equal("25c1825ef9c20d4f3ab5d20910afacf96f40496827264c28385f45d82ce00e60", macos.File("vision.onnx").Sha256);
+        Assert.Equal(windows.File("vision.onnx").Sha256, published.ForPlatform("linux").File("vision.onnx").Sha256);
+        Assert.Equal(windows.File("text.onnx").Sha256, macos.File("text.onnx").Sha256);
+        foreach (var m in new[] { windows, macos })
+        {
+            Assert.Equal(new[] { "vision.onnx", "text.onnx", "tokenizer.model" }, m.Files.Select(f => f.Name));
+            // v1 was 755 MB; the int8 token table took 196 MB off the text tower.
+            Assert.InRange(m.TotalBytes, 500_000_000, 600_000_000);
+        }
+        Assert.Equal(ModelManifest.CurrentPlatform, ModelManifest.Embedded().Platform);
+    }
+
+    [Fact]
+    public void ManifestsWithoutPlatformsServeEveryPlatform()
+    {
+        Assert.All(new[] { "windows", "macos", "linux" }, p =>
+            Assert.Equal(_manifest.Files.Select(f => f.Sha256), _manifest.ForPlatform(p).Files.Select(f => f.Sha256)));
+        var twice = new ModelManifest
+        {
+            ModelId = "test-model",
+            Files = [.. _manifest.Files, new ModelFile { Name = "vision.onnx", Sha256 = new string('0', 64), Url = "x", Platforms = ["macos"] }],
+        };
+        Assert.Throws<InvalidDataException>(() => twice.ForPlatform("macos"));
+        Assert.Equal(3, twice.ForPlatform("windows").Files.Count);
+    }
+
+    /// <summary>A manifest listing vision.onnx per platform: the store fetches this platform's and only that.</summary>
+    [Fact]
+    public async Task DownloadsOnlyThisPlatformsEntry()
+    {
+        var other = new byte[1000];
+        new Random(5).NextBytes(other);
+        File.WriteAllBytes(Path.Combine(_serverRoot, "vision-other.onnx"), other);
+        string here = ModelManifest.CurrentPlatform;
+        string elsewhere = here == "macos" ? "windows" : "macos";
+        var mine = _manifest.File("vision.onnx");
+        var manifest = new ModelManifest
+        {
+            ModelId = "test-model",
+            Files =
+            [
+                new ModelFile { Name = "vision.onnx", Bytes = other.Length, Sha256 = Convert.ToHexStringLower(SHA256.HashData(other)), Url = _server.BaseUrl + "vision-other.onnx", Platforms = [elsewhere] },
+                new ModelFile { Name = "vision.onnx", Bytes = mine.Bytes, Sha256 = mine.Sha256, Url = mine.Url, Platforms = [here] },
+                _manifest.File("text.onnx"),
+                _manifest.File("tokenizer.model"),
+            ],
+        };
+        using var store = NewStore();
+        string dir = await store.EnsureAsync(manifest, null, CancellationToken.None);
+        Assert.Equal(mine.Sha256, await ModelStore.Sha256Async(Path.Combine(dir, "vision.onnx"), CancellationToken.None));
+        Assert.DoesNotContain(_server.Requests, r => r.Path.Contains("vision-other", StringComparison.Ordinal));
+        Assert.True(await store.IsCompleteAsync(manifest, CancellationToken.None));
+        Assert.Equal(here, ModelManifest.Parse(File.ReadAllText(Path.Combine(dir, "manifest.json"))).Platform);
     }
 }

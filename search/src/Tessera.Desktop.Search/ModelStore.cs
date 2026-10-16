@@ -8,7 +8,7 @@ namespace Tessera.Desktop.Search;
 
 /// <summary>
 /// Makes <c>&lt;ModelsDir&gt;/&lt;modelId&gt;/</c> hold every file the manifest
-/// lists, with the right sha256. Missing or wrong files are downloaded to a
+/// lists for this platform, with the right sha256. Missing or wrong files are downloaded to a
 /// <c>.part</c> file, resumed with a Range request when one is already
 /// there, verified, then renamed into place. Nothing is trusted until its
 /// hash matches.
@@ -62,6 +62,7 @@ public sealed class ModelStore : IDisposable
     public async Task<string> EnsureAsync(ModelManifest manifest, IProgress<ModelDownloadProgress>? progress, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(manifest);
+        manifest = manifest.ForPlatform();
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -90,6 +91,8 @@ public sealed class ModelStore : IDisposable
     /// <summary>True when every file is present with the right size and hash. Does not download.</summary>
     public async Task<bool> IsCompleteAsync(ModelManifest manifest, CancellationToken ct)
     {
+        ArgumentNullException.ThrowIfNull(manifest);
+        manifest = manifest.ForPlatform();
         string dir = DirectoryFor(manifest.ModelId);
         foreach (ModelFile file in manifest.Files)
         {
