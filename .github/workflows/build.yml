@@ -100,12 +100,19 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # Counts, not a listing: `ls | head` closes the pipe early, and under
+      # pipefail the broken pipe failed the step on macOS.
       - name: Publish the core
         shell: bash
         run: |
           rm -rf src-tauri/resources/core
           dotnet publish core/src/Tessera.Api -c Release -r ${{ matrix.rid }} --self-contained -o src-tauri/resources/core
-          ls -la src-tauri/resources/core | head -20
+          exe=src-tauri/resources/core/tessera-core${{ runner.os == 'Windows' && '.exe' || '' }}
+          test -x "$exe" || { echo "::error::$exe is missing or not executable"; exit 1; }
+          files=$(find src-tauri/resources/core -type f | wc -l | tr -d ' ')
+          mb=$(du -sm src-tauri/resources/core | cut -f1)
+          echo "core publish: $files files, $mb MB"
+          echo "core publish (${{ matrix.rid }}): $files files, $mb MB" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build the web app
         shell: bash
@@ -175,3 +182,181 @@ jobs:
             src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/release/bundle/macos/*.app.tar.gz
             src-tauri/target/release/bundle/**/*.sig
+
+      # The bundle as a buyer runs it: the shell starts the core from the
+      # .app's resources. Then the shell is killed outright, and the core must
+      # see its stdin close and exit by itself, removing core.pid (no orphans).
+      - name: Launch the app (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          apps=(src-tauri/target/release/bundle/macos/*.app)
+          dmgs=(src-tauri/target/release/bundle/dmg/*.dmg)
+          app="${apps[0]}"
+          dmg="${dmgs[0]}"
+          core="$app/Contents/Resources/resources/core/tessera-core"
+          test -x "$core" || { echo "::error::$core is missing or not executable"; exit 1; }
+          exe="$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+          dmg_mb=$(awk -v b="$(stat -f %z "$dmg")" 'BEGIN { printf "%.1f", b / 1048576 }')
+          app_mb=$(du -sm "$app" | cut -f1)
+          core_files=$(find "$app/Contents/Resources/resources/core" -type f | wc -l | tr -d ' ')
+
+          export TESSERA_DATA_DIR="$RUNNER_TEMP/app-data"
+          start=$(date +%s)
+          "$exe" > "$RUNNER_TEMP/app.out" 2>&1 &
+          shell_pid=$!
+          ready=""
+          for _ in $(seq 1 90); do
+            ready=$(grep -h "ready on 127.0.0.1" "$TESSERA_DATA_DIR"/logs/shell-*.log 2>/dev/null || true)
+            [ -n "$ready" ] && break
+            sleep 1
+          done
+          ready_s=$(( $(date +%s) - start ))
+          if [ -z "$ready" ]; then
+            echo "::error::the shell did not report the core ready within 90 s"
+            cat "$RUNNER_TEMP/app.out" "$TESSERA_DATA_DIR"/logs/*.log || true
+            kill "$shell_pid" || true
+            exit 1
+          fi
+          echo "$ready"
+
+          sleep 5   # let the web app draw before the screenshot
+          screencapture -x "$RUNNER_TEMP/app.png" || echo "no screenshot"
+          core_pid=$(cat "$TESSERA_DATA_DIR/core.pid")
+          kill "$shell_pid"
+          for _ in $(seq 1 40); do
+            kill -0 "$core_pid" 2>/dev/null || break
+            sleep 0.5
+          done
+          tail -n 40 "$TESSERA_DATA_DIR"/logs/shell-*.log
+          if kill -0 "$core_pid" 2>/dev/null; then
+            echo "::error::the core (pid $core_pid) outlived the shell by 20 s"
+            kill -9 "$core_pid"
+            exit 1
+          fi
+          test ! -e "$TESSERA_DATA_DIR/core.pid" || { echo "::error::core.pid was left behind"; exit 1; }
+          {
+            echo "### macOS bundle"
+            echo
+            echo "| Measure | Value |"
+            echo "|---|---|"
+            echo "| DMG | $(basename "$dmg"), $dmg_mb MB |"
+            echo "| .app on disk | $app_mb MB, core $core_files files |"
+            echo "| app launch to core ready (shell log) | about $ready_s s |"
+            echo "| shell killed | core exited by itself, core.pid removed |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Launch screenshot and logs (macOS)
+        if: runner.os == 'macOS' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-app-launch
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/app.png
+            ${{ runner.temp }}/app.out
+            ${{ runner.temp }}/app-data/logs/
+
+  # The parts on a Mac without the shell: the core's and the search
+  # library's tests, the real model through ModelStore on CoreML and on the
+  # CPU, and the published core driven through the contract's handshake
+  # (src-tauri/tools/smoke). The numbers land in the job summary.
+  smoke-macos:
+    name: smoke (macos-latest)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      DOTNET_NOLOGO: 'true'
+      DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: .NET 10
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build the smoke harness
+        run: dotnet build src-tauri/tools/smoke -c Release -o "$RUNNER_TEMP/smoke"
+
+      # The model is 700+ MB. Keyed on the files' sha256s, so a new export
+      # gets a new cache entry and nothing stale is ever loaded.
+      - name: Model cache key
+        id: model-key
+        run: |
+          id=$(jq -r '.modelId' models/manifest.json)
+          sums=$(jq -r '[.files[].sha256] | join(" ")' models/manifest.json | shasum -a 256 | cut -c1-16)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "key=model-$id-$sums" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the model
+        id: model-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/tessera-models
+          key: ${{ steps.model-key.outputs.key }}
+
+      # ModelStore with the manifest's public URLs, no token; on a cache hit
+      # it only verifies the sha256s.
+      - name: Download the model
+        id: model
+        run: |
+          "$RUNNER_TEMP/smoke/tessera-smoke" model "$HOME/tessera-models"
+
+      - name: Save the model
+        if: steps.model-cache.outputs.cache-hit != 'true' && steps.model.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/tessera-models
+          key: ${{ steps.model-key.outputs.key }}
+
+      # Every step from here runs even when an earlier one failed, so one
+      # run on the Mac reports everything it can.
+      - name: dotnet test core
+        if: ${{ !cancelled() }}
+        run: dotnet test core
+
+      # With the model present the embedder tests run too (CPU against the
+      # PyTorch reference vectors, and CoreML when it loads).
+      - name: dotnet test search
+        if: ${{ !cancelled() }}
+        run: |
+          if [ "${{ steps.model.outcome }}" = success ]; then
+            export TESSERA_MODELS_DIR="$HOME/tessera-models/${{ steps.model-key.outputs.id }}"
+          fi
+          dotnet test search --logger "console;verbosity=detailed"
+
+      - name: Search with the real model (CoreML and CPU)
+        if: ${{ !cancelled() && steps.model.outcome == 'success' }}
+        run: |
+          "$RUNNER_TEMP/smoke/tessera-smoke" search "$HOME/tessera-models" --require-gpu
+
+      - name: Publish the core (osx-arm64)
+        if: ${{ !cancelled() }}
+        run: |
+          dotnet publish core/src/Tessera.Api -c Release -r osx-arm64 --self-contained -o "$RUNNER_TEMP/core"
+          echo "core publish: $(find "$RUNNER_TEMP/core" -type f | wc -l | tr -d ' ') files, $(du -sm "$RUNNER_TEMP/core" | cut -f1) MB"
+
+      - name: A library of generated pictures
+        if: ${{ !cancelled() }}
+        run: |
+          "$RUNNER_TEMP/smoke/tessera-smoke" images "$RUNNER_TEMP/library" --count 50
+
+      - name: The core through the contract's handshake
+        if: ${{ !cancelled() }}
+        run: |
+          models=()
+          [ "${{ steps.model.outcome }}" = success ] && models=(--models-from "$HOME/tessera-models" --embeddings)
+          "$RUNNER_TEMP/smoke/tessera-smoke" core "$RUNNER_TEMP/core/tessera-core" \
+            "$RUNNER_TEMP/library" "$RUNNER_TEMP/data" "${models[@]}" --timeout 600
+
+      - name: Core logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-smoke-core-logs
+          if-no-files-found: ignore
+          path: ${{ runner.temp }}/data/logs/
