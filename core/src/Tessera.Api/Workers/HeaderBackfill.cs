@@ -51,10 +51,37 @@ public sealed class HeaderBackfill(
     /// <summary>After a pass that could read nothing, there is no point asking the same absent drive every minute.</summary>
     private static readonly TimeSpan AfterNothingReadable = TimeSpan.FromMinutes(10);
 
+    /// <summary>How long a date count is reused. Counting 200,000 contents by source costs about 120 ms.</summary>
+    private static readonly TimeSpan CountsFor = TimeSpan.FromSeconds(10);
+
     private long _unreadable;
+    private long _batches;
+    private (DateCounts Counts, long At, DateTimeOffset? ScanFinished, long Batches)? _counts;
 
     /// <summary>Contents the latest pass could not read (root not mounted, file changed); retried later.</summary>
     public long Unreadable => Interlocked.Read(ref _unreadable);
+
+    /// <summary>
+    /// Where the timeline's dates come from. The Library page polls every two
+    /// seconds while a scan runs, and the count is one pass over every
+    /// content, so while things change it is taken at most every
+    /// <see cref="CountsFor"/>; once a scan finishes or a backfill batch
+    /// lands it is taken fresh, so a settled library never shows a stale one.
+    /// </summary>
+    /// <param name="latestScanFinished">The newest finished scan run, from the caller's own read of them.</param>
+    public async Task<DateCounts> CountsAsync(DateTimeOffset? latestScanFinished, CancellationToken ct)
+    {
+        var batches = Interlocked.Read(ref _batches);
+        if (_counts is { } c && c.ScanFinished == latestScanFinished && c.Batches == batches &&
+            Stopwatch.GetElapsedTime(c.At) < CountsFor)
+        {
+            return c.Counts;
+        }
+
+        var fresh = await content.DateCountsAsync(ct);
+        _counts = (fresh, Stopwatch.GetTimestamp(), latestScanFinished, batches);
+        return fresh;
+    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -134,6 +161,7 @@ public sealed class HeaderBackfill(
 
             retimed += await content.ApplyMetadataAsync(reads, ct);
             read += reads.Count;
+            Interlocked.Increment(ref _batches);
         }
 
         Interlocked.Exchange(ref _unreadable, unreadable);

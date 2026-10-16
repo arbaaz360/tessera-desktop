@@ -22,7 +22,7 @@ public static class LibraryEndpoints
         var g = app.MapGroup("/api/library").WithTags("library").RequireUser();
 
         g.MapGet("/", async (
-            CurrentUser me, LibraryRepository library, JobRepository jobs, FreeTier tier, ContentRepository content,
+            CurrentUser me, LibraryRepository library, JobRepository jobs, FreeTier tier,
             ScanRunner scans, LibraryWatch watch, HeaderBackfill backfill, IImageEmbedder embedder, CancellationToken ct) =>
         {
             var accountId = me.AccountIdOrThrow;
@@ -31,7 +31,7 @@ public static class LibraryEndpoints
             var thumbs = await jobs.ThumbnailCountsAsync(ct);
             var embeddings = await jobs.EmbeddingCountsAsync(embedder.ModelId, ct);
             var licence = await tier.StatusAsync(ct);
-            var dates = await content.DateCountsAsync(ct);
+            var dates = await backfill.CountsAsync(runs.Values.Max(r => r.FinishedAt), ct);
 
             return Results.Ok(new
             {
