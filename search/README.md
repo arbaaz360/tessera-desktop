@@ -9,7 +9,7 @@ and gets `IImageEmbedder` and `IVectorIndex` as singletons.
 |---|---|
 | `src/Tessera.Desktop.Search.Abstractions` | the interfaces; written by the coordinator, frozen |
 | `src/Tessera.Desktop.Search` | the implementation |
-| `tests/Tessera.Desktop.Search.Tests` | xunit; 41 tests |
+| `tests/Tessera.Desktop.Search.Tests` | xunit; 44 tests |
 | `../models` | the export script, the manifest, the published model files |
 
 ## Build and test
@@ -39,9 +39,9 @@ Environment variables, all optional, none used by the product:
 
 | Class | Does |
 |---|---|
-| `ModelManifest` | the embedded `models/manifest.json`: file names, sizes, sha256, URLs, tokenizer facts |
-| `ModelStore` | makes `<ModelsDir>/<modelId>/` hold every manifest file: hashes what is there, downloads what is missing or wrong to a `.part` with Range resume and progress, verifies, renames into place, writes `manifest.json` beside them. Three attempts; a hash mismatch deletes the part. One download at a time; concurrent callers wait on it |
-| `SiglipEmbedder` | `IImageEmbedder`. Loads both towers once; DirectML on Windows when `PreferGpu` and a hardware adapter exists (the one with the most video memory), CoreML on macOS when `PreferGpu` (below), CPU otherwise and whenever a GPU provider fails to initialise. `Device` says which. `EmbedImages` and `EmbedTexts` take a batch; on CoreML the sessions take exactly 8 images and 1 sentence, so short batches are padded and long ones chunked (`FixedImageBatch` says so) |
+| `ModelManifest` | the embedded `models/manifest.json`: file names, sizes, sha256, URLs, tokenizer facts, input shapes. From version 4 a file may be listed per platform (`platforms`: Windows and Linux get v2's `vision.onnx`, macOS v3's); `ForPlatform` narrows it and `Embedded()` returns this platform's |
+| `ModelStore` | makes `<ModelsDir>/<modelId>/` hold every manifest file for this platform: hashes what is there, downloads what is missing or wrong to a `.part` with Range resume and progress, verifies, renames into place, writes `manifest.json` beside them. Three attempts; a hash mismatch deletes the part. One download at a time; concurrent callers wait on it |
+| `SiglipEmbedder` | `IImageEmbedder`. Loads both towers once; DirectML on Windows when `PreferGpu` and a hardware adapter exists (the one with the most video memory), on macOS with `PreferGpu` the CPU at once and CoreML swapped in when it has loaded (below), CPU otherwise and whenever a GPU provider fails to initialise. `Device` says which, now. `DeviceUpgrade` completes when the macOS move is over. `EmbedImages` and `EmbedTexts` take a batch; on CoreML the sessions take exactly 8 images and 1 sentence, so short batches are padded and long ones chunked (`FixedImageBatch` says so) |
 | `ImagePreprocessor` | any `SKBitmap` → 256×256 squash-resize (no crop), `(x/255 − 0.5)/0.5`, NCHW float32 |
 | `GemmaTextTokenizer` | the Gemma SentencePiece model through `Microsoft.ML.Tokenizers`; no BOS, EOS appended, right-padded with 0 to 64, content truncated so the EOS fits |
 | `BruteForceVectorIndex` | `IVectorIndex`. int8 rows with one scale each, float accumulation (AVX2+FMA, else `Vector128`, else scalar), filter before top-k, parallel over 4096-row blocks, reader-writer lock, one-file save/load (`TSVX`, version 1) |
@@ -91,15 +91,16 @@ second on the GPU.
 A 50,000-image library at CPU batch-8 speed embeds in about 80 minutes; on
 the RTX 5060 Ti in about 7.
 
-Model v3 computes the vision tower in float32 so that Core ML matches the
-CPU (`models/README.md`). Measured the same day with the GPU otherwise
-idle, two rounds each, 8 CPU threads:
+v3's vision tower computes in float32 so that Core ML matches the CPU
+(`models/README.md`); on DirectML that cost 40%, so Windows keeps v2's
+file (manifest version 4). Measured with the GPU otherwise idle, 8 CPU
+threads:
 
-| Vision, batch 8 | v2 arithmetic | v3 |
+| Vision, batch 8 | v2's file (Windows from manifest v4) | v3's file (macOS) |
 |---|---|---|
-| CPU | 10.3 – 10.5 img/s | 11.0 – 11.2 img/s |
-| DirectML, RTX 5060 Ti | 168 – 174 img/s | 100 – 101 img/s |
-| Text, CPU / DirectML (unchanged tower) | 25 / 6.5 – 6.7 ms | the same |
+| CPU | 10.3 – 10.5 img/s (8.7 – 9.4 in the full test run) | 11.0 – 11.2 img/s |
+| DirectML, RTX 5060 Ti | 168 – 174 img/s; 152 – 167 again through the store from manifest v4 (three rounds) | 100 – 101 img/s |
+| Text, CPU / DirectML (the same tower) | 25 – 29 / 6.5 – 8.0 ms | the same |
 
 Model v2 changed only the text tower (its token table is int8; see
 `models/README.md`). Measured in a fresh process per file, five interleaved
@@ -132,30 +133,70 @@ the tower is the other 350 MB.
 | `ModelCacheDirectory` | `<model dir>/coreml/<tower>-<sha256[..16]>-b<batch>-ort<version>-MLProgram-CPUAndGPU/` | without it ONNX Runtime converts and compiles both towers at every launch. ONNX Runtime keys its cache by a hash of the model's path and reuses whatever is there, so the folder name carries everything else that shapes the compiled model; other folders for the same tower are deleted when a new one is made, and a cache that fails to load is deleted and compiled again once |
 | `RequireStaticInputShapes`, `SpecializationStrategy`, `AllowLowPrecisionAccumulationOnGPU` | defaults | shapes are static once fixed; a fast-prediction specialisation cannot be judged without a GPU to run on; low-precision accumulation is what float32 arithmetic is there to avoid |
 
-On the `macos-latest` runner (macOS 26, Apple silicon, 3 cores, ONNX Runtime
-1.24.4), model v3, runs
-[38953158750](https://github.com/arbaaz360/tessera-desktop/actions/runs/38953158750)
-and [38956260548](https://github.com/arbaaz360/tessera-desktop/actions/runs/38956260548):
+#### CPU first, CoreML when it has loaded
 
-| | CoreML | CPU |
+A CoreML load takes minutes on the runner, so on macOS `EnsureReadyAsync`
+opens the CPU sessions and returns ready, and CoreML compiles and loads on
+a background task. When it is ready the embedder swaps one counted session
+set for the other: a call takes a reference to the set that is active when
+it starts and keeps it to the end, so calls already running finish on the
+CPU and later calls use CoreML; the CPU set is disposed when the last call
+using it returns. `Device` turns from `Cpu` to `CoreML`. If CoreML fails
+the embedder stays on the CPU and logs why. The two sides' vectors agree
+(below), so an index built partly on each is one index. Windows (DirectML
+or CPU) loads as before, in one step.
+
+On the `macos-latest` runner (macOS 26, Apple silicon, 3 cores, ONNX Runtime
+1.24.4), run
+[38968062311](https://github.com/arbaaz360/tessera-desktop/actions/runs/38968062311):
+
+| A Mac start, `PreferGpu` true | First launch | Second launch |
 |---|---|---|
-| Device with `PreferGpu` true / false | `CoreML`, batch fixed at 8 | `Cpu` |
+| Ready, on the CPU (sha256 of the model files, both CPU sessions) | 3.4 s | 2.3 s |
+| First search answered, from the start of the load (red first) | 8.1 s | |
+| Moved to CoreML | 261 s after ready (vision compiled in 153 s, text in 108 s) | 125 s after ready, from the cache (vision 62 s, text 60 s) |
+| Inside the published core: `/api/search` answers, from process start | 9.1 s, device `cpu` | |
+| Inside the published core: `/api/search/status` says `coreml` | 274 s after start | |
+| The swap with calls running (`SwapsSessionsWhileEmbedsRun`, second CPU set) | 18 calls across it, cosine 1.000000; Windows 37 – 39 | |
+
+| Once loaded | CoreML | CPU |
+|---|---|---|
 | "a solid red square" over red, green, blue swatches | red 0.1609, blue 0.1174, green 0.1026 | red 0.1612, blue 0.1176, green 0.1027 |
 | Vectors against each other (red, green, blue, sentence) | 1.00000, 1.00000, 1.00000, 0.99996 | |
-| Images/s, batch 8, 640×480 sources | 8.5 – 10.1 (the test: 9.8 from 1600×1200) | 1.2 – 1.3 |
+| Images/s, batch 8, 640×480 sources | 8.5 – 12.9 (the test: 9.8 from 1600×1200) | 1.2 – 1.7 |
 | One image alone (padded to 8) | 1.33 img/s | 1.62 img/s |
-| Text, median of 10 | 12.1 – 15.2 ms | 139.6 – 147.0 ms |
-| Load, first time (download verified, both towers compiled) | 221 – 272 s: vision 118 – 148 s, text 102 – 123 s | 3.0 – 3.7 s |
-| Load, from the cache | 108 – 130 s: vision 57 – 68 s, text 51 – 61 s | |
+| Text, median of 10 | 9.5 – 15.2 ms | 125 – 147 ms |
 | Cache on disk | 2,590 MB (79 files) | |
 
-The CoreML load is the cost to watch. The cache saves ONNX Runtime's
-conversion and Core ML's compile, about half; the rest is Core ML itself.
-Loading the cached compiled vision model with Core ML alone
-(`tools/smoke/coreml_load.swift`, no ONNX Runtime) took 105 s, 56 s again,
-and 79 s CPU-only. Core ML on the runner lists a GPU ("Apple Paravirtual
-device") but its compute plan put all 536 ops on the CPU. A real Mac is
-likely faster, and unmeasured.
+Ranges are over runs 38953158750, 38956260548 and 38968062311. The CoreML
+load itself is Core ML's: loading the cached compiled vision model with
+Core ML alone (`tools/smoke/coreml_load.swift`, no ONNX Runtime) took 99 –
+105 s, 51 – 56 s again, 79 – 97 s CPU-only. Core ML on the runner lists a
+GPU ("Apple Paravirtual device") but its compute plan put all 536 ops on
+the CPU. A real Mac is likely faster, and unmeasured.
+
+#### What the cache holds
+
+ONNX Runtime writes, per partition, the ML package it generated
+(`model/`, with `Data/com.microsoft.OnnxRuntime/model.mlmodel`) and Core
+ML's compiled model inside it (`model/compiled_model.mlmodelc`). Run
+38968062311:
+
+| Tower | On disk | Compiled `model.mil` | Package `model.mlmodel` |
+|---|---|---|---|
+| vision (partition 0 of 4) | 1.4 GB | 1,012 MB | 329 MB |
+| text (partition 1 of 5) | 1.1 GB | 998 MB | 162 MB |
+
+No weight file over 10 MB exists: the weights are inside `model.mil`, a
+text format, about 1 GB per tower (93 M float32 vision weights, 86 M
+float16 text weights). That
+is both the size and the likely reason a load from the cache still takes a
+minute per tower. Not changed: the package part (0.5 GB) is not read once
+the compiled model exists, but deleting it leans on ONNX Runtime's cache
+layout; and with CPU-first a missing cache only delays CoreML (261 s
+against 125 s on the runner), it never blocks search. Dropping the cache
+would save 2.6 GB on every Mac for that delay at every launch; a real Mac's
+numbers should decide it.
 
 `src-tauri/tools/smoke` holds the tools that chose these:
 `tessera-smoke coreml <tower.onnx> --units … --format … --cache …
@@ -175,6 +216,8 @@ candidate graphs.
 | DirectML vs CPU, same files (`GpuMatchesCpu`) | text ≥ 0.999996, image ≥ 0.9999999 from model v3 (v2: 0.99998) |
 | CoreML vs CPU, macOS runner (`GpuMatchesCpu`) | text ≥ 0.99986, image ≥ 0.99999 (model v3; v2 refused to load, and in float16 arithmetic reached 0.983) |
 | Fixed batches (CoreML's padding path, run on the CPU) vs dynamic | 1.000000 for 1, 3, 8 and 11 images and for sentences one by one |
+| Across the CPU-to-CoreML swap (first search on the CPU vs after the move, runner) | 1.00000, 1.00000, 1.00000, 0.99996 |
+| Windows' v2 vision vs macOS' v3 vision, the five fixtures (export) | ≥ 0.9999946 |
 | Same image twice | bit-identical vectors |
 | "a solid red image" against red, blue, green swatches | red first; blue and green likewise |
 
@@ -193,8 +236,8 @@ candidate graphs.
 
 | | |
 |---|---|
-| Size, model v3 | 559 MB (vision 186, text 369, tokenizer 4); from v2 an install downloads only `vision.onnx` (186 MB): `text.onnx` and `tokenizer.model` are the same bytes |
-| Download of v3 on the macOS runner, no token, verified | 559 MB in 9 to 10 s |
+| Size, manifest v4 | 559 MB on each platform (vision 186, text 369, tokenizer 4): Windows gets v2's `vision.onnx`, macOS v3's. Windows upgrading from v2 downloads nothing; a Windows folder holding v3's vision gets v2's back (186 MB, 3.3 s here) |
+| Download on the macOS runner, no token, verified | 559 MB in 6 to 10 s |
 | Size, model v2 | 559 MB (vision 186, text 369, tokenizer 4) |
 | Size, model v1 | 755 MB (vision 186, text 565, tokenizer 4) |
 | Real download of v2 from the public release, no token, verified (2026-10-16) | 73.7 s (61 Mbit/s), all three hashes matched |
@@ -254,12 +297,16 @@ Both pinned to the same version, the newest the DirectML package reaches.
   which Core ML sees no GPU and no Neural Engine: every op ran on its CPU
   backend (compute plan: 536 of 536). A real Mac will put work on the GPU;
   its speed, its load time and its vectors against the CPU are unmeasured.
-- **A CoreML start is slow on the runner and its cache is large**: 221 – 272 s
-  for both towers the first time, 108 – 130 s from the cache, which takes 2.6 GB
-  next to a 559 MB model (above). Search waits for it at every launch. The
-  core could answer on the CPU (3 s to load) and swap CoreML in when it is
-  ready; vectors from the two agree to 0.99996, so the index does not care.
-  Measure on a real Mac first.
+- **CoreML arrives late on the runner and its cache is large**: search
+  answers on the CPU within seconds, but CoreML takes over 261 s after the
+  first launch and 125 s after later ones, from a 2.6 GB cache whose
+  compiled models hold their weights as text (above). Whether to keep the
+  cache, and whether a real Mac loads fast enough to drop it, needs a real
+  Mac.
+- **`IImageEmbedder.Device` now changes once on macOS** (`Cpu`, then
+  `CoreML`). The frozen interface says "the device chosen at load time";
+  the core reads it per request, so `/api/search/status` follows, but the
+  contract's wording is the coordinator's to update.
 - ~~The download URLs answered 404 while the repository was private.~~
   Resolved 2026-10-16: the files moved to the public model-only repository
   `arbaaz360/siglip2-base-onnx` and the manifest points there.

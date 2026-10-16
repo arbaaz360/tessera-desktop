@@ -16,32 +16,38 @@ are a GitHub release.
 
 ## The published files
 
-Release [`models-siglip2-base-v3`](https://github.com/arbaaz360/siglip2-base-onnx/releases/tag/models-siglip2-base-v3)
-of the public, model-only repository
+Releases of the public, model-only repository
 [`arbaaz360/siglip2-base-onnx`](https://github.com/arbaaz360/siglip2-base-onnx)
-(decided by the owner 2026-10-16), so a buyer's app downloads with no token
-while this repository stays private. Its README carries the Apache-2.0
-attribution, the hashes and the list of changes.
+(decided by the owner 2026-10-16), so a buyer's app downloads with no token.
+Its README carries the Apache-2.0 attribution, the hashes and the list of
+changes. `models/manifest.json` (version 4) lists the vision tower once per
+platform, each from the release that published it:
 
-| File | Size | What |
-|---|---|---|
-| `vision.onnx` | 186 MB | `pixel_values [batch,3,256,256] float32` → `image_embeds [batch,768]`, L2-normalised; float16 weights, float32 arithmetic, explicit Conv pads (v3) |
-| `text.onnx` | 369 MB | `input_ids [batch,64] int64` → `text_embeds [batch,768]`, L2-normalised; token table int8; byte-identical to v2 |
-| `tokenizer.model` | 4 MB | the Gemma SentencePiece model, copied from the checkpoint |
-| `manifest.json` | 2 KB | the same file as `models/manifest.json`; lists the input shapes, so the library knows the free dimension is `batch` |
+| File | Platforms | From release | Size | What |
+|---|---|---|---|---|
+| `vision.onnx` | Windows, Linux | [`v2`](https://github.com/arbaaz360/siglip2-base-onnx/releases/tag/models-siglip2-base-v2) | 186 MB | `pixel_values [batch,3,256,256] float32` → `image_embeds [batch,768]`, L2-normalised; float16 arithmetic |
+| `vision.onnx` | macOS | [`v3`](https://github.com/arbaaz360/siglip2-base-onnx/releases/tag/models-siglip2-base-v3) | 186 MB | the same, float32 arithmetic and explicit Conv pads, which Core ML needs (below) |
+| `text.onnx` | all | v3 (byte-identical to v2) | 369 MB | `input_ids [batch,64] int64` → `text_embeds [batch,768]`, L2-normalised; token table int8 |
+| `tokenizer.model` | all | v3 (byte-identical to v1, v2) | 4 MB | the Gemma SentencePiece model, copied from the checkpoint |
 
-559 MB in all, down from 755 MB in v1. Weights are float16 except the text
+The library narrows the manifest to its own platform
+(`ModelManifest.ForPlatform`), so a machine downloads and verifies three
+files. The manifest also records the input shapes, so the library knows
+the free dimension is `batch`. The two vision files agree to cosine
+0.9999946, so both platforms share one `modelId` and one kind of index.
+
+559 MB per platform, down from 755 MB in v1. Weights are float16 except the text
 tower's token table; inputs and outputs float32; opset 17, standard
 operators only. Normalisation is inside the graph, so a consumer never
 divides by a norm.
 
-`models-siglip2-base-v1` (755 MB, all float16) and `-v2` stay published:
-builds that shipped with their manifests download them. v2 and v3 keep the
-`modelId` `siglip2-base-patch16-256`. v2 changed only the text tower; v3
-only the vision tower's arithmetic, and its image vectors agree with v2's
-to cosine ≥ 0.9999946 (the five fixtures, and 20 pictures: ten wallpapers
-and ten synthetic), so stored indexes stay valid and an install upgrading
-from v2 downloads only `vision.onnx` (186 MB).
+`models-siglip2-base-v1` (755 MB, all float16), `-v2` and `-v3` stay
+published: builds that shipped with their manifests download them. Every
+manifest keeps the `modelId` `siglip2-base-patch16-256`: v2 changed only the
+text tower; v3 only the vision tower's arithmetic, and its image vectors
+agree with v2's to cosine ≥ 0.9999946 (the five fixtures, and 20 pictures:
+ten wallpapers and ten synthetic). An install on Windows upgrading from v2
+downloads nothing; a Mac downloads v3's `vision.onnx`.
 
 ## Run the export
 
@@ -90,6 +96,20 @@ gh release create models-siglip2-base-v3 -R arbaaz360/siglip2-base-onnx models/o
 cp models/out/manifest.json models/manifest.json
 cp models/out/fixtures/* search/tests/Tessera.Desktop.Search.Tests/fixtures/
 ```
+
+The version-4 manifest came from the same export with v2's vision file
+listed for Windows and Linux; no new release, its entries point at v2's and
+v3's assets:
+
+```bash
+gh release download models-siglip2-base-v2 -R arbaaz360/siglip2-base-onnx -p vision.onnx -D <dir>
+models/.venv/Scripts/python models/export_siglip2.py --reuse-fp32 --keep-fp32 --images <folder> --vision-from <dir>/vision.onnx --vision-from-release models-siglip2-base-v2
+```
+
+| Option | What |
+|---|---|
+| `--vision-from FILE` | list this released `vision.onnx` for `--vision-from-platforms` (default `windows,linux`); the exported one serves the rest. The export checks both give the fixtures' vectors to cosine 0.99999 |
+| `--vision-from-release TAG` | the release `--vision-from` was published in; its URL goes in the manifest |
 
 A new export is a new release tag there (`--release`) and a new `version` in
 the manifest; the library only ever trusts the hashes it was built with.
@@ -156,12 +176,13 @@ The CPU provider loses nothing (it computed in float32 already, minus some
 float16 round trips). DirectML loses 40% of its raw speed; the release
 build's whole pipeline was 26 pictures a second end to end (300 screenshots
 searchable in 11.5 s), so thumbnails, not embeddings, set the pace there.
-An integrated GPU, where float16 is twice float32, was not measured. The
-alternative that keeps DirectML at full speed is two vision files, float16
-for Windows and float32 for macOS, each platform's build embedding its own
-manifest: one more file per release and a manifest per platform, for
-vectors that agree to 0.99999 anyway. Not taken; it is a manifest change if
-the GPU speed matters more.
+An integrated GPU, where float16 is twice float32, was not measured.
+
+The owner chose (2026-10-17) to keep DirectML at full speed: the manifest
+lists v2's vision file for Windows and Linux and v3's for macOS, one
+manifest for every build, narrowed by the library at run time. Windows
+measured again with v2's file through the store: DirectML 152–167 img/s at
+batch 8 over three rounds, the v2 rate.
 
 ## Cutting the download (2026-10-16)
 

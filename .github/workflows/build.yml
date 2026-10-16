@@ -372,11 +372,17 @@ jobs:
           find "$cache" -mindepth 4 -maxdepth 4 \( -name model -o -name compiled_model.mlmodelc \) -exec du -sh {} + | sed "s|$cache/||"
           echo "--- files over 10 MB"
           find "$cache" -type f -size +10M -exec ls -l {} + | awk '{printf "%8.0f MB  %s\n", $5/1048576, $9}' | sed "s|$cache/||"
+          echo "--- weight files"
+          find "$cache" -name '*.bin' -exec ls -l {} + | awk '{printf "%10d B  %s\n", $5, $9}' | sed "s|$cache/||"
+          mil=$(find "$cache" -path '*vision-*' -name model.mil -size +100M | head -1)
+          echo "--- how the vision model.mil holds its weights: const lines $(grep -c ' = const()' "$mil"), with BLOBFILE $(grep -c 'BLOBFILE' "$mil")"
+          grep -m 3 -o 'tensor<fp[0-9]*, \[[0-9, ]*\]> [^ ]* = const()\[[^]]\{0,160\}' "$mil" || true
           vision=$(ls -d "$cache"/vision-*)
           pruned="$RUNNER_TEMP/pruned/$(basename "$vision")"
           mkdir -p "$(dirname "$pruned")" && cp -R "$vision" "$pruned"
-          find "$pruned" -mindepth 3 -maxdepth 3 -name model -type d | while read -r d; do rm -rf "$d" && mkdir "$d"; done
-          echo "--- the vision cache without its ML packages: $(du -sh "$pruned" | cut -f1) (was $(du -sh "$vision" | cut -f1))"
+          # Only the uncompiled package (model/Data); the compiled model and model/Manifest.json stay.
+          find "$pruned" -mindepth 4 -maxdepth 4 -path '*/model/Data' -type d -exec rm -rf {} +
+          echo "--- the vision cache without the uncompiled packages: $(du -sh "$pruned" | cut -f1) (was $(du -sh "$vision" | cut -f1))"
           "$RUNNER_TEMP/smoke/tessera-smoke" coreml "$HOME/tessera-models/$id/vision.onnx" --units CPUAndGPU --cache "$pruned" --label pruned || echo "probe exit $?"
 
       # Not a gate: how much of a warm CoreML start is Core ML itself,
