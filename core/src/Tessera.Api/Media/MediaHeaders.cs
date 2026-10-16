@@ -71,6 +71,15 @@ public static class MediaHeaders
         return Read(stream, Path.GetFileName(path), zone, now);
     }
 
+    /// <summary>
+    /// Read headers from the front of a file already in memory, reaching into
+    /// the open file only past it (a camera MP4's <c>moov</c> after its media,
+    /// a TIFF's IFD at the end). The scanner calls this from inside its hash
+    /// pass: one open per file, and for a photo no read beyond the hash's own.
+    /// </summary>
+    public static HeaderFacts Read(ReadOnlyMemory<byte> head, Stream file, string fileName, TimeZoneInfo zone, DateTimeOffset now) =>
+        Read(new HeadFirstStream(head, file), fileName, zone, now);
+
     /// <param name="fileName">Used only to tell formats apart when the magic bytes are ambiguous.</param>
     public static HeaderFacts Read(Stream stream, string fileName, TimeZoneInfo zone, DateTimeOffset now)
     {
@@ -336,6 +345,70 @@ public static class MediaHeaders
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// The file, read from <c>head</c> while the position is inside it and
+    /// from the file itself past it. Seekable both ways; never writes.
+    /// </summary>
+    private sealed class HeadFirstStream(ReadOnlyMemory<byte> head, Stream file) : Stream
+    {
+        private long _position;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => true;
+        public override bool CanWrite => false;
+        public override long Length => Math.Max(file.Length, head.Length);
+
+        public override long Position
+        {
+            get => _position;
+            set => _position = value;
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+        public override int Read(Span<byte> buffer)
+        {
+            if (_position < head.Length)
+            {
+                var n = (int)Math.Min(buffer.Length, head.Length - _position);
+                head.Span.Slice((int)_position, n).CopyTo(buffer);
+                _position += n;
+                return n;
+            }
+
+            file.Position = _position;
+            var read = file.Read(buffer);
+            _position += read;
+            return read;
+        }
+
+        public override int ReadByte()
+        {
+            if (_position < head.Length)
+            {
+                return head.Span[(int)_position++];
+            }
+
+            Span<byte> one = stackalloc byte[1];
+            return Read(one) == 1 ? one[0] : -1;
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => _position = origin switch
+        {
+            SeekOrigin.Begin => offset,
+            SeekOrigin.Current => _position + offset,
+            _ => Length + offset,
+        };
+
+        public override void Flush()
+        {
+        }
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     /// <summary>

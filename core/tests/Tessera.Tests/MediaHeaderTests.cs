@@ -173,6 +173,33 @@ public sealed class MediaHeaderTests : IDisposable
         Assert.True(mp4Read < 64 * 1024, $"read {mp4Read} bytes of a {new FileInfo(mp4).Length}-byte MP4");
     }
 
+    [Fact]
+    public async Task Headers_read_inside_the_hash_pass_match_a_separate_read_and_leave_the_hash_alone()
+    {
+        // A JPEG whose headers are all in the first chunk, and an MP4 whose
+        // moov sits behind 3 MB of media: past the chunk, so the reader must
+        // reach into the open file.
+        var jpeg = PathFor("pass.jpg");
+        MediaFiles.Jpeg(jpeg, new ExifFields(DateTimeOriginal: "2023:07:14 09:15:00", OffsetTimeOriginal: "+02:00"), width: 600, height: 400, noise: true);
+        var mp4 = PathFor("pass.mp4");
+        MediaFiles.Mp4(mp4, new DateTime(2022, 8, 9, 10, 11, 12, DateTimeKind.Utc), 4, 1280, 720, mediaBytes: 3 << 20, moovLast: true);
+        Assert.True(new FileInfo(mp4).Length > Hashing.FirstChunk);
+
+        foreach (var path in new[] { jpeg, mp4 })
+        {
+            HeaderFacts inPass = default;
+            var sha = await Hashing.Sha256FileAsync(path, (head, open) =>
+            {
+                inPass = MediaHeaders.Read(head, open, Path.GetFileName(path), Zone, Now);
+                open.Seek(0, SeekOrigin.End);   // whatever the reader did, the hash must not care
+            });
+
+            Assert.Equal(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path)), sha);
+            Assert.NotNull(inPass.TakenAt);
+            Assert.Equal(MediaHeaders.Read(path, Zone, Now), inPass);
+        }
+    }
+
     private static long BytesReadFor(string path, out HeaderFacts facts)
     {
         using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 1);

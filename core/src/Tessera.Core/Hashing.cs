@@ -19,7 +19,21 @@ public static class Hashing
     // off the large object heap when pooled.
     private const int BufferSize = 1 << 20;
 
-    public static async Task<byte[]> Sha256FileAsync(string path, CancellationToken ct = default)
+    public static Task<byte[]> Sha256FileAsync(string path, CancellationToken ct = default) =>
+        Sha256FileAsync(path, peek: null, ct);
+
+    /// <summary>The bytes <see cref="Sha256FileAsync(string, Action{ReadOnlyMemory{byte}, Stream}?, CancellationToken)"/> reads first, and offers to its peek.</summary>
+    public const int FirstChunk = BufferSize;
+
+    /// <param name="peek">
+    /// Called once, with the first <see cref="FirstChunk"/> bytes (fewer for
+    /// a smaller file) and the open file, before the rest is read. It lets a
+    /// caller read a file's headers from bytes already in memory, without
+    /// opening the file a second time - on a network share or a USB disk an
+    /// open is a round trip. It may seek the stream; the hash never depends
+    /// on what it does.
+    /// </param>
+    public static async Task<byte[]> Sha256FileAsync(string path, Action<ReadOnlyMemory<byte>, Stream>? peek, CancellationToken ct = default)
     {
         await using var stream = new FileStream(
             path,
@@ -40,6 +54,16 @@ public static class Hashing
         try
         {
             int read;
+            if (peek is not null)
+            {
+                // A whole first chunk, not whatever one read returns: the
+                // peek is promised the front of the file.
+                var first = await stream.ReadAtLeastAsync(buffer.AsMemory(0, BufferSize), BufferSize, throwOnEndOfStream: false, ct);
+                sha.TransformBlock(buffer, 0, first, null, 0);
+                peek(buffer.AsMemory(0, first), stream);
+                stream.Position = first;
+            }
+
             while ((read = await stream.ReadAsync(buffer.AsMemory(0, BufferSize), ct)) > 0)
             {
                 sha.TransformBlock(buffer, 0, read, null, 0);

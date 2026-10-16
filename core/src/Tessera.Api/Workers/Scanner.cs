@@ -290,24 +290,27 @@ public sealed class Scanner(
             return Reconciled.Unchanged;
         }
 
-        // Headers first: a few KB and the odd seek, which leaves the front of
-        // the file in the cache for the hash that follows.
+        // The headers are read inside the hash pass, from the first megabyte
+        // it has already read: one open per file, and no read the hash would
+        // not make anyway, except a seek for a header that sits past it.
         var now = DateTimeOffset.UtcNow;
+        var name = Path.GetFileName(absPath);
         var headers = default(HeaderFacts);
         var metaVersion = CaptureDates.ReaderVersion;
-        try
+        var sha = await Hashing.Sha256FileAsync(absPath, (head, open) =>
         {
-            headers = MediaHeaders.Read(absPath, opts.LocalZone, now);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // Could not open it for headers; the hash below will say whether
-            // the file is readable at all. Left unread, the backfill retries.
-            metaVersion = 0;
-        }
+            try
+            {
+                headers = MediaHeaders.Read(head, open, name, opts.LocalZone, now);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Left unread; the backfill tries again.
+                metaVersion = 0;
+            }
+        }, ct);
 
-        var captured = MediaHeaders.Resolve(headers, Path.GetFileName(absPath), mtime, opts.LocalZone, now);
-        var sha = await Hashing.Sha256FileAsync(absPath, ct);
+        var captured = MediaHeaders.Resolve(headers, name, mtime, opts.LocalZone, now);
         var file = new ScannedFile(
             Sha256: sha,
             ByteSize: info.Length,
