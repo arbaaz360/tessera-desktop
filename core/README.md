@@ -13,7 +13,7 @@ measures.
 | `src/Tessera.Core` | Pure rules: hashing, path spelling, scan safety, capture-date parsing, the domain records |
 | `src/Tessera.Data` | SQLite: the schema (embedded migrations), Dapper repositories, the work queue |
 | `src/Tessera.Api` | Kestrel, the boot handshake, token auth, the routes, the workers, the header reader, the fake search |
-| `tests/Tessera.Tests` | 173 tests: repositories on a temp database, the scanner over real PNGs and JPEGs, header bytes written by hand (EXIF, eXIf, XMP, MP4), a 200,000-row timeline, the boot handshake against the real exe |
+| `tests/Tessera.Tests` | 174 tests: repositories on a temp database, the scanner over real PNGs and JPEGs, header bytes written by hand (EXIF, eXIf, XMP, MP4), a 200,000-row timeline, the boot handshake against the real exe |
 | `tessera-core.slnx` | So that `dotnet test core` works from the repo root |
 
 ## Build, test, publish
@@ -173,6 +173,45 @@ embedder.
 | RAM (working set) | 56 MB idle, 110 MB after the scan, 159 MB peak during thumbnails, 144 MB after |
 | `library.db` for 1,000 contents | 828 KB |
 | Seeding 200,000 contents + timeline rows | 15 s |
+
+### Capture dates and copies: what they cost the scan (2026-10-16)
+
+The 537 files/s above was taken on a quiet machine on 2026-10-15. On
+2026-10-16 several other sessions were building, testing and downloading on
+it, and the **unchanged** build scanned the same 1,000 JPEGs anywhere from
+2.0 s to 34 s (30 to 489 files/s) while its own CPU stayed between 0.5 and
+1.3 s: it was waiting on a shared disk, not working. Against the old figure nothing
+could be judged that day. So before and after were run **alternately, in one
+process each, JIT warm, a fresh database per scan, search off**: the real
+`Scanner` built from the commit before this change and from this branch, 15
+scans each per fixture. The second fixture is the same 1,000 JPEGs with a
+camera-like EXIF block (Make, Model, the three dates, offset, sub-seconds,
+about 20 KB) in front.
+
+| 1,000 new JPEGs, 15 scans each | Before (median) | After (median) | Change |
+|---|---|---|---|
+| Plain (no EXIF): wall | 6.29 s, 159 files/s | 6.42 s, 156 files/s | +2 % |
+| Plain: the process's CPU | 0.81 s | 0.84 s | +4 % |
+| With EXIF: wall | 4.82 s, 207 files/s | 4.23 s, 237 files/s | within noise |
+| With EXIF: CPU | 0.73 s (fastest 0.58 s) | 1.03 s (fastest 0.67 s) | +0.09 s to +0.30 s per 1,000 |
+
+On wall time, the rate the task set a bound on, the scan stays within 20 %:
++2 % on plain JPEGs and no measurable change with EXIF. CPU rises 4 % on
+plain JPEGs and 0.1 to 0.3 ms per file with EXIF (parsing the IFDs), which
+does not reach the rate because the scan is not CPU-bound: about 1 s of CPU
+in a 4 to 6 s scan, the rest set by the disk and the single SQLite writer.
+What could not be done that day is re-measure the absolute 537 files/s. In
+isolation (one thread, warm cache, its own open):
+
+| What | Number |
+|---|---|
+| Header read of a 105 KB JPEG, no EXIF | 50 µs (hashing it: 95 µs) |
+| Same with the EXIF block | 59 µs (hashing it: 99 µs) |
+| Bytes the reader asks for, 2.5 MB noisy JPEG with EXIF | 321 |
+| Bytes it asks for, MP4 with 16 MB of media before its `moov` | 242 (the rest is seeked past) |
+| Opens per new file during a scan | 1: headers are parsed from the hash pass's first megabyte |
+| `dates` counts at 200,000 contents | 123 ms uncached, so reused up to 10 s while changing; an empty backfill batch 0.05 ms |
+| Published build, EXIF fixture, end to end | `dates`: exif 1,000, pending 0; `lastScan.copies` 0 |
 
 ## Not done
 

@@ -2,6 +2,7 @@ using SkiaSharp;
 using Tessera.Api;
 using Tessera.Api.Media;
 using Tessera.Core;
+using Xunit.Abstractions;
 
 namespace Tessera.Tests;
 
@@ -11,7 +12,7 @@ namespace Tessera.Tests;
 /// movie header, the fallbacks, the shape - and that none of it reads past
 /// the headers.
 /// </summary>
-public sealed class MediaHeaderTests : IDisposable
+public sealed class MediaHeaderTests(ITestOutputHelper output) : IDisposable
 {
     private static readonly DateTimeOffset Now = new(2026, 10, 16, 12, 0, 0, TimeSpan.Zero);
     private static readonly TimeZoneInfo Zone = CaptureDateTests.Plus0530;
@@ -163,6 +164,7 @@ public sealed class MediaHeaderTests : IDisposable
         Assert.NotNull(jpegFacts.TakenAt);
         Assert.True(new FileInfo(jpeg).Length > 2_000_000);
         Assert.True(jpegRead < 64 * 1024, $"read {jpegRead} bytes of a {new FileInfo(jpeg).Length}-byte JPEG");
+        output.WriteLine($"JPEG: read {jpegRead:N0} of {new FileInfo(jpeg).Length:N0} bytes");
 
         // A camera MP4 with 16 MB of media BEFORE its movie header: the
         // reader must seek past it, not read it.
@@ -171,6 +173,7 @@ public sealed class MediaHeaderTests : IDisposable
         var mp4Read = BytesReadFor(mp4, out var mp4Facts);
         Assert.Equal(2022, mp4Facts.TakenAt!.Value.Year);
         Assert.True(mp4Read < 64 * 1024, $"read {mp4Read} bytes of a {new FileInfo(mp4).Length}-byte MP4");
+        output.WriteLine($"MP4, moov after the media: read {mp4Read:N0} of {new FileInfo(mp4).Length:N0} bytes");
     }
 
     [Fact]
