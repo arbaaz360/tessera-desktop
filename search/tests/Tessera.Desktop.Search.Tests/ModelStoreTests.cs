@@ -210,10 +210,16 @@ public class ModelStoreTests : IDisposable
     public void EmbeddedManifestIsTheShippedOne()
     {
         var m = ModelManifest.Embedded();
-        // v2 changed only the text tower, so image vectors and stored indexes stay valid under the same id.
+        // v2 changed only the text tower and v3 only the vision tower's padding
+        // (same arithmetic), so image vectors and stored indexes stay valid under the same id.
         Assert.Equal("siglip2-base-patch16-256", m.ModelId);
-        Assert.Equal(2, m.Version);
-        Assert.Equal("models-siglip2-base-v2", m.Release);
+        Assert.Equal(3, m.Version);
+        Assert.Equal("models-siglip2-base-v3", m.Release);
+        // CoreML fixes the batch dimension by the name the graphs give it.
+        Assert.Equal("batch", m.Inputs.Vision.BatchDimension);
+        Assert.Equal("batch", m.Inputs.Text.BatchDimension);
+        Assert.Equal("pixel_values", m.Inputs.Vision.Name);
+        Assert.Equal("input_ids", m.Inputs.Text.Name);
         Assert.Equal(768, m.Dimensions);
         Assert.Equal(256, m.ImageSize);
         Assert.Equal(64, m.Tokenizer.MaxLength);

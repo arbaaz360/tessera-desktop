@@ -3,7 +3,7 @@ using Tessera.Smoke;
 // tessera-smoke images <dir> [--count 50]
 // tessera-smoke model  <models-dir>
 // tessera-smoke search <models-dir> [--require-gpu] [--load-from <model-dir>]
-// tessera-smoke coreml <tower.onnx> [--batch 8] [--units ALL] [--format MLProgram] [--cache <dir>] [--loads 1] [--label <name>]
+// tessera-smoke coreml <tower.onnx> [--batch 8] [--units ALL] [--format MLProgram] [--cache <dir>] [--loads 1] [--label <name>] [--option key=value]... [--verbose]
 // tessera-smoke core   <core-exe> <library-dir> <data-dir> [--models-from <models-dir>] [--embeddings] [--expect-device coreml] [--timeout <s>]
 //
 // Each command prints what it checked and the numbers, appends a Markdown
@@ -19,7 +19,8 @@ try
         ["coreml", var onnx, ..] => CoreMlProbe.Run(
             onnx, Args.Int(args, "--batch", 8),
             Args.String(args, "--units") ?? "ALL", Args.String(args, "--format") ?? "MLProgram",
-            Args.String(args, "--cache"), Args.Int(args, "--loads", 1), Args.String(args, "--label")),
+            Args.String(args, "--cache"), Args.Int(args, "--loads", 1), Args.String(args, "--label"),
+            Args.All(args, "--option"), args.Contains("--verbose")),
         ["core", var exe, var library, var data, ..] => await CoreSmoke.RunAsync(
             exe, library, data,
             Args.String(args, "--models-from"),
@@ -42,7 +43,7 @@ static int Usage()
           tessera-smoke images <dir> [--count 50]
           tessera-smoke model  <models-dir>
           tessera-smoke search <models-dir> [--require-gpu] [--load-from <model-dir>]
-          tessera-smoke coreml <tower.onnx> [--batch 8] [--units ALL] [--format MLProgram] [--cache <dir>] [--loads 1] [--label <name>]
+          tessera-smoke coreml <tower.onnx> [--batch 8] [--units ALL] [--format MLProgram] [--cache <dir>] [--loads 1] [--label <name>] [--option key=value]... [--verbose]
           tessera-smoke core   <core-exe> <library-dir> <data-dir> [--models-from <models-dir>] [--embeddings] [--expect-device coreml] [--timeout <s>]
         """);
     return 2;

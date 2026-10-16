@@ -1,21 +1,31 @@
 {
   "modelId": "siglip2-base-patch16-256",
-  "version": 2,
+  "version": 3,
   "source": "google/siglip2-base-patch16-256",
   "licence": "Apache-2.0",
-  "release": "models-siglip2-base-v2",
+  "release": "models-siglip2-base-v3",
   "dimensions": 768,
   "imageSize": 256,
   "textLength": 64,
-  "weights": "float16; text token table int8, per-row scale",
+  "weights": "float16; vision computes in float32; text token table int8, per-row scale",
   "inputs": {
     "vision": {
       "name": "pixel_values",
-      "type": "tensor(float)"
+      "type": "tensor(float)",
+      "shape": [
+        "batch",
+        3,
+        256,
+        256
+      ]
     },
     "text": {
       "name": "input_ids",
-      "type": "tensor(int64)"
+      "type": "tensor(int64)",
+      "shape": [
+        "batch",
+        64
+      ]
     }
   },
   "tokenizer": {
@@ -32,21 +42,21 @@
   "files": [
     {
       "name": "vision.onnx",
-      "bytes": 186099025,
-      "sha256": "ae478837056f3038d6793d4eb6450f4eacc8fc3b38711a4cd1d899af3f4747c7",
-      "url": "https://github.com/arbaaz360/siglip2-base-onnx/releases/download/models-siglip2-base-v2/vision.onnx"
+      "bytes": 186151511,
+      "sha256": "25c1825ef9c20d4f3ab5d20910afacf96f40496827264c28385f45d82ce00e60",
+      "url": "https://github.com/arbaaz360/siglip2-base-onnx/releases/download/models-siglip2-base-v3/vision.onnx"
     },
     {
       "name": "text.onnx",
       "bytes": 368714934,
       "sha256": "3cf1137e1c9b9a73dda692d66dd0b2b95988b85b6bc3d4347c87f3b2ee485039",
-      "url": "https://github.com/arbaaz360/siglip2-base-onnx/releases/download/models-siglip2-base-v2/text.onnx"
+      "url": "https://github.com/arbaaz360/siglip2-base-onnx/releases/download/models-siglip2-base-v3/text.onnx"
     },
     {
       "name": "tokenizer.model",
       "bytes": 4241003,
       "sha256": "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2",
-      "url": "https://github.com/arbaaz360/siglip2-base-onnx/releases/download/models-siglip2-base-v2/tokenizer.model"
+      "url": "https://github.com/arbaaz360/siglip2-base-onnx/releases/download/models-siglip2-base-v3/tokenizer.model"
     }
   ]
 }

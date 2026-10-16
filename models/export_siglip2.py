@@ -22,11 +22,17 @@ Two size options, each measured on its own (see models/README.md):
                           quantised per call). A new modelId, because image
                           vectors change and stored indexes go stale.
 
-Core ML (macOS) needs two things the plain export lacks, both applied by
-models/coreml_compat.py and checked by its audit before anything is written:
-explicit zero `pads` on the patch-embedding Conv instead of `auto_pad=VALID`
-(model v3), and the input shapes in the manifest, so the library can fix the
-batch dimension by name.
+Core ML (macOS) needs three things the plain export lacks, all from
+models/coreml_compat.py (model v3):
+
+    explicit zero `pads` on the patch-embedding Conv instead of
+    `auto_pad=VALID`, which Core ML refuses;
+    --vision-compute fp32 (the default): the vision tower computes in
+    float32 from its float16 weights. Core ML runs a float16 graph in
+    float16 throughout and lands at cosine 0.983 against the CPU; in
+    float32 it lands at 1.00000;
+    the input shapes in the manifest, so the library can fix the batch
+    dimension by name.
 
 Also written to the output dir:
 
@@ -505,6 +511,9 @@ def main() -> int:
     ap.add_argument("--compare", action="store_true",
                     help="build and verify every variant, whatever is published")
     ap.add_argument("--release", default=RELEASE_TAG, help="release tag the manifest URLs name")
+    ap.add_argument("--vision-compute", choices=["fp16", "fp32"], default="fp32",
+                    help="fp32 (from v3): the float16 vision graph computes in float32, weights stay "
+                         "float16 in the file; Core ML matches the CPU only this way")
     ap.add_argument("--text-from", type=Path, default=None,
                     help="publish this text.onnx instead of the one exported here (verified the same "
                          "way); keeps a released text tower byte for byte")
@@ -566,7 +575,7 @@ def main() -> int:
 
     import onnx
     sys.path.insert(0, str(HERE))
-    from coreml_compat import audit, explicit_conv_pads
+    from coreml_compat import audit, explicit_conv_pads, float32_islands
 
     for p in (vision_fp32, text_fp32):
         m = onnx.load(str(p))
@@ -617,6 +626,16 @@ def main() -> int:
         log(f"int8weights: vision {vw.stat().st_size / 1e6:.1f} MB; {weight_stats['matmuls']} MatMuls, "
             f"column cosine min {weight_stats['column_cosine_min']:.5f}")
     publish_v = base_v
+    if args.vision_compute == "fp32":
+        if args.variant != "fp16" or args.vision_matmul != "fp16":
+            raise SystemExit("--vision-compute fp32 applies to the float16 vision graph (--variant fp16)")
+        v32 = out / "vision.fp32compute.onnx"
+        m = onnx.load(str(base_v))
+        moved = float32_islands(m, lambda n: True)
+        onnx.save(m, str(v32))
+        quantised["fp32compute"] = (v32, base_t)
+        publish_v = v32
+        log(f"fp32compute: {moved} vision nodes in float32, weights float16; {v32.stat().st_size / 1e6:.1f} MB")
     if args.vision_matmul == "int8":
         publish_v = quantised["int8matmul_pc" if args.per_channel else "int8matmul"][0]
     elif args.vision_matmul == "int8w":
@@ -808,6 +827,8 @@ def main() -> int:
             "url": f"https://github.com/{REPO}/releases/download/{args.release}/{name}",
         })
     weights = "float16" if args.variant == "fp16" else "float16-weights-float32-compute"
+    if args.vision_compute == "fp32":
+        weights += "; vision computes in float32"
     if args.text_table == "int8":
         weights += "; text token table int8, per-row scale"
     if args.vision_matmul == "int8":

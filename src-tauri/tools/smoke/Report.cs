@@ -75,6 +75,10 @@ internal static class Args
         return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
     }
 
+    /// <summary>Every value given for a repeatable option.</summary>
+    public static IReadOnlyList<string> All(string[] args, string name) =>
+        [.. args.Select((a, i) => (a, i)).Where(p => p.a == name && p.i + 1 < args.Length).Select(p => args[p.i + 1])];
+
     public static int Int(string[] args, string name, int fallback) =>
         String(args, name) is { } s ? int.Parse(s, CultureInfo.InvariantCulture) : fallback;
 }

@@ -20,12 +20,15 @@ internal static class CoreMlProbe
     private static readonly string[] Sentences = ["a solid red square", "a photo of a dog on a beach", "a city skyline at night"];
 
     /// <param name="loads">Sessions to open one after the other; with a cache directory the second shows a warm start.</param>
-    public static int Run(string onnx, int batch, string units, string format, string? cache, int loads, string? label)
+    /// <param name="options">Further CoreML provider options, <c>key=value</c> (SpecializationStrategy, ProfileComputePlan, ...).</param>
+    /// <param name="verbose">ONNX Runtime logs at INFO, with timestamps: where a load spends its time.</param>
+    public static int Run(string onnx, int batch, string units, string format, string? cache, int loads, string? label,
+        IReadOnlyList<string> options, bool verbose)
     {
         var ort = OrtEnv.Instance().GetVersionString();
         var name = label ?? Path.GetFileName(Path.GetDirectoryName(Path.GetFullPath(onnx)));
         var report = new Report($"CoreML probe: {name}/{Path.GetFileName(onnx)}, {format}, {units}, batch {batch}"
-            + $"{(cache is null ? "" : ", cached")} (ONNX Runtime {ort})");
+            + $"{(cache is null ? "" : ", cached")}{string.Concat(options.Select(o => ", " + o))} (ONNX Runtime {ort})");
 
         using var cpuOptions = new SessionOptions { GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL };
         using var cpu = new InferenceSession(onnx, cpuOptions);
@@ -48,10 +51,16 @@ internal static class CoreMlProbe
             using var so = new SessionOptions
             {
                 GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
-                LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING,   // the partition count
+                LogSeverityLevel = verbose ? OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO : OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING,   // the partition count
             };
             so.AddFreeDimensionOverrideByName(dim, batch);
             var providerOptions = new Dictionary<string, string> { ["ModelFormat"] = format, ["MLComputeUnits"] = units };
+            foreach (var option in options)
+            {
+                var (key, value) = (option[..option.IndexOf('=')], option[(option.IndexOf('=') + 1)..]);
+                providerOptions[key] = value;
+            }
+
             if (cache is not null)
             {
                 Directory.CreateDirectory(cache);

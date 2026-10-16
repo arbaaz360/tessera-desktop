@@ -416,28 +416,60 @@ jobs:
           "$RUNNER_TEMP/venv/bin/python" -I models/coreml_compat.py audit "$model/vision.onnx"
           "$RUNNER_TEMP/venv/bin/python" -I models/coreml_compat.py variants "$model/vision.onnx" "$RUNNER_TEMP/variants"
 
-      - name: Vision candidates on CoreML (ALL)
+      # Run 1 (a258bb2) chose the graph: float16 compute lands at cosine
+      # 0.983 on CoreML whatever the compute units; float32 compute (all32)
+      # at 1.00000. This run asks where a two-minute load goes.
+      - name: Load time, vision in float32 compute
         if: ${{ !cancelled() }}
         run: |
-          for v in pads ln32 mlp32 attn32 all32; do
-            echo "::group::$v"
-            "$RUNNER_TEMP/smoke/tessera-smoke" coreml "$RUNNER_TEMP/variants/$v/vision.onnx" --label "$v" || echo "probe $v exit $?"
-            echo "::endgroup::"
-          done
+          v="$RUNNER_TEMP/variants/all32/vision.onnx"
+          smoke="$RUNNER_TEMP/smoke/tessera-smoke"
+          echo "::group::cold, with the cache, ONNX Runtime INFO log"
+          "$smoke" coreml "$v" --label all32 --units CPUAndGPU --cache "$RUNNER_TEMP/cache-v" --verbose > "$RUNNER_TEMP/cold.log" 2>&1 || echo "probe exit $?"
+          grep -v "onnxruntime" "$RUNNER_TEMP/cold.log" || true
+          echo "::endgroup::"
+          echo "--- INFO lines about CoreML, the cache and the session, with timestamps"
+          grep -i -E "coreml|cache|compil|session|partition|initializ" "$RUNNER_TEMP/cold.log" | grep onnxruntime | cut -c1-260 | head -80 || true
+          echo "::group::warm, a second process on the same cache"
+          "$smoke" coreml "$v" --label all32 --units CPUAndGPU --cache "$RUNNER_TEMP/cache-v" || echo "probe exit $?"
+          echo "::endgroup::"
+          find "$RUNNER_TEMP/cache-v" -maxdepth 3 | head -30
+          du -sh "$RUNNER_TEMP/cache-v"/*/* || true
 
-      - name: Compute units (explicit pads only)
+      - name: Core ML alone loading the cached compiled model
         if: ${{ !cancelled() }}
         run: |
-          for u in CPUAndGPU CPUOnly; do
-            echo "::group::$u"
-            "$RUNNER_TEMP/smoke/tessera-smoke" coreml "$RUNNER_TEMP/variants/pads/vision.onnx" --units "$u" --label pads || echo "probe $u exit $?"
-            echo "::endgroup::"
-          done
+          biggest=$(find "$RUNNER_TEMP/cache-v" -name compiled_model.mlmodelc -type d -exec du -sk {} + | sort -n | tail -1 | cut -f2)
+          echo "largest partition: $biggest ($(du -sh "$biggest" | cut -f1))"
+          swift src-tauri/tools/smoke/coreml_load.swift "$biggest" cpuOnly cpuAndGPU cpuOnly all
 
-      - name: Text tower and the model cache
+      - name: Where the ops run (ProfileComputePlan)
+        if: ${{ !cancelled() }}
+        run: |
+          "$RUNNER_TEMP/smoke/tessera-smoke" coreml "$RUNNER_TEMP/variants/all32/vision.onnx" --label all32 --units CPUAndGPU             --cache "$RUNNER_TEMP/cache-v" --option ProfileComputePlan=1 > "$RUNNER_TEMP/plan.log" 2>&1 || echo "probe exit $?"
+          grep -v "onnxruntime" "$RUNNER_TEMP/plan.log" | grep -v -i "profile\|device\|cost" || true
+          echo "--- compute plan: lines per device"
+          for d in MLCPUComputeDevice MLGPUComputeDevice MLNeuralEngineComputeDevice; do echo "$d $(grep -c "$d" "$RUNNER_TEMP/plan.log")"; done
+          grep -i -E "profile|device|cost" "$RUNNER_TEMP/plan.log" | head -25 | cut -c1-260 || true
+
+      - name: NeuralNetwork format and FastPrediction, for the record
+        if: ${{ !cancelled() }}
+        run: |
+          v="$RUNNER_TEMP/variants/all32/vision.onnx"
+          echo "::group::NeuralNetwork"
+          "$RUNNER_TEMP/smoke/tessera-smoke" coreml "$v" --label all32 --units CPUAndGPU --format NeuralNetwork 2>&1 | grep -v "\[I:" || echo "probe exit $?"
+          echo "::endgroup::"
+          echo "::group::MLProgram, SpecializationStrategy=FastPrediction"
+          "$RUNNER_TEMP/smoke/tessera-smoke" coreml "$v" --label all32 --units CPUAndGPU --option SpecializationStrategy=FastPrediction || echo "probe exit $?"
+          echo "::endgroup::"
+
+      - name: Text tower, cold and warm
         if: ${{ !cancelled() }}
         run: |
           model="$HOME/tessera-models/${{ steps.model-key.outputs.id }}"
-          "$RUNNER_TEMP/smoke/tessera-smoke" coreml "$model/text.onnx" --label v2 || echo "probe text exit $?"
-          "$RUNNER_TEMP/smoke/tessera-smoke" coreml "$RUNNER_TEMP/variants/pads/vision.onnx" --label pads \
-            --cache "$RUNNER_TEMP/coreml-cache" --loads 2 || echo "probe cache exit $?"
+          for run in cold warm; do
+            echo "::group::$run"
+            "$RUNNER_TEMP/smoke/tessera-smoke" coreml "$model/text.onnx" --label v2 --units CPUAndGPU --cache "$RUNNER_TEMP/cache-t" || echo "probe exit $?"
+            echo "::endgroup::"
+          done
+          du -sh "$RUNNER_TEMP/cache-t" || true
