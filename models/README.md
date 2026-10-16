@@ -64,11 +64,15 @@ models/.venv/Scripts/python models/rank_check.py --model v1=<folder with the v1 
 A vision change publishes under a new `modelId` (`…-q8`), because image
 vectors change and stored indexes would mix two spaces.
 
-`rank_check.py` embeds the Windows wallpapers and lock screens (24 distinct
-photos) and four colour swatches, runs nine queries with known answers, and
-compares every model with the first one: first hit, top-5 overlap, cosines.
-`--extra DIR` adds up to 200 more pictures and 16 more queries for an
-agreement-only check.
+`rank_check.py` runs the nine ground-truth queries of the root README
+status section (exact strings, listed in the script with their accepted
+answers) over every picture under `C:\Windows\Web` except 4K (32 distinct)
+and four 512×512 swatches, and compares every model with the first one:
+first hit, the group answers (five lakes, both blues, the keyboard
+textures, the four planets), top-5 overlap, cosines. `--extra DIR` adds up
+to 200 more pictures and 16 more queries for an agreement-only check.
+`--app-index <data dir>` ranks a text tower against the image vectors the
+app itself stored (exact for a text-only change; below).
 
 Then publish and refresh the embedded copy:
 
@@ -88,28 +92,39 @@ cosine against PyTorch stays at or above 0.995; a vision variant must also
 save at least 60 MB.
 
 Cosine against PyTorch float32 is the worst of the ten verification
-screenshots and ten sentences. Ranking columns compare each variant with v1:
-nine queries with known answers over 28 pictures, then 25 queries over 228
-pictures (the 28 plus 200 screenshots).
+screenshots and ten sentences. The nine ground-truth queries are checked
+two ways:
 
-| Variant | vision | text | Download | Image cos | Text cos | Nine queries: same first hit, top-5 overlap | 25 × 228: same first hit, top-5 mean | Verdict |
-|---|---|---|---|---|---|---|---|---|
-| v1, float16 | 186 MB | 565 MB | 755 MB | 0.99999 | 1.00000 | — | — | was shipped |
-| **int8 token table** | 186 MB | **369 MB** | **559 MB** | 0.99999 | **0.99928** | **9/9, 5/5 on every query** | **23/25, 4.96** | **shipped as v2** |
-| vision MatMuls int8, dynamic | 101 MB | 565 MB | 670 MB | 0.71842 | 1.00000 | 7/9, min 3/5 | 11/25, 2.24 | rejected |
-| the same, per-channel weights | 102 MB | 565 MB | 671 MB | 0.72930 | 1.00000 | 7/9, min 4/5 | 11/25, 2.4 | rejected |
-| vision MatMul weights int8, float16 compute | 97 MB | 565 MB | 666 MB | 0.99928 | 1.00000 | 9/9, 5/5 | 20/25, 4.96 | passes; not shipped |
-| both int8 (table and vision weights) | 97 MB | 369 MB | 470 MB | 0.99928 | 0.99928 | 8/9, 5/5 | 19/25, 4.96 | not shipped |
-| *PyTorch float32, for scale* | | | | 1 | 1 | 8/9, 5/5 | 23/25, 4.96 | |
+- **In the app** (`--app-index`). The release app's v1 run stored 336 image
+  vectors, made from its own thumbnails through its own preprocessing. A
+  text-only change leaves them valid, so v2's text tower is scored against
+  them exactly as the app scores. v1 reproduces the coordinator's run to
+  three decimals (lakes `ThemeC-img30` 0.149, `ThemeC-img29` 0.110,
+  `Spotlight-img50` 0.085, the swatches, `TouchKeyboardThemeLight002` 0.138,
+  `ThemeA-img22` 0.132).
+- **In Python**, both towers, needed for a vision change: PIL resizes the
+  originals, so scores differ from the app's by up to 0.02. On "a glowing
+  planet in dark space" this pipeline puts `ThemeA-img23` 0.0019 ahead of
+  `ThemeA-img22` for v1 and PyTorch alike, so variants are compared with
+  v1 in the same pipeline.
 
-For the two variants that pass, every first hit that changed was a near tie
-in v1. The one nine-query change ("a calm lake with mountains", img28 →
-img29, both lakes) is a tie to four
-decimals that PyTorch float32 also breaks the other way. In the 25 × 228
-check the int8 table changed two first hits whose v1 margins were 0.0004
-and 0.0001, the same count as PyTorch float32 itself; the weight-only
-vision variant changed five, all with v1 margins at or under 0.0024, all on
-screenshots.
+The last column adds 200 screenshots and 16 queries (25 × 236).
+
+| Variant | vision | text | Download | Image cos | Text cos | Nine queries, in the app | Nine queries, Python: same first hit, top-5 overlap | 25 × 236: same first hit, top-5 mean | Verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| v1, float16 | 186 MB | 565 MB | 755 MB | 0.99999 | 1.00000 | — | — | — | was shipped |
+| **int8 token table** | 186 MB | **369 MB** | **559 MB** | 0.99999 | **0.99928** | **9/9 first hits, every group held, top five identical in order; scores within 0.002** | 9/9, 5/5 | 23/25, 4.96 | **shipped as v2** |
+| vision MatMuls int8, dynamic | 101 MB | 565 MB | 670 MB | 0.71842 | 1.00000 | | 7/9, min 3/5 | 11/25, 2.16 | rejected |
+| the same, per-channel weights | 102 MB | 565 MB | 671 MB | 0.72930 | 1.00000 | | 6/9, min 3/5 | 9/25, 2.4 | rejected |
+| vision MatMul weights int8, float16 compute | 97 MB | 565 MB | 666 MB | 0.99928 | 1.00000 | | 9/9, 5/5 | 20/25, 4.96 | passes; not shipped |
+| both int8 (table and vision weights) | 97 MB | 369 MB | 470 MB | 0.99928 | 0.99928 | | 9/9, 5/5 | 20/25, 4.96 | not shipped |
+| *PyTorch float32, for scale* | | | | 1 | 1 | | 9/9, 5/5 | 24/25, 4.96 | |
+
+The passing variants changed no first hit on the nine queries. In the
+25 × 236 check every first hit they changed was a near tie in v1, all on
+screenshots: the int8 table changed two (v1 margins 0.0004 and 0.0001;
+PyTorch float32 changes one, margin 0.0001), the weight-only vision
+variant five (margins at or under 0.0024).
 
 ### Why the int8 table works
 

@@ -1,14 +1,16 @@
 #!/usr/bin/env python
-"""
+r"""
 Does a smaller model still rank pictures the way the shipped one does?
 
-Embeds a small library of real photographs (the Windows wallpapers and lock
-screens, deduplicated by sha256 as the product does) plus four colour
-swatches, runs nine queries whose right answer is known, and compares every
-model given on the command line with the baseline (the first one):
+Embeds a small library of real photographs (every picture under
+C:\Windows\Web except 4K, deduplicated by sha256 as the product does: 32)
+plus four colour swatches, runs the nine ground-truth queries of the root
+README with their known answers, and compares every model given on the
+command line with the baseline (the first one):
 
-    first hit      the top result, whether it is a right answer, and whether
-                   it is the same picture the baseline puts first
+    first hit      the top result, whether it (and the top k, where the
+                   answer is a group) is right, and whether it is the same
+                   picture the baseline puts first
     top-5 overlap  how many of the baseline's top five the model also has
     cosines        each image and query vector against the baseline's
 
@@ -38,25 +40,27 @@ warnings.filterwarnings("ignore")
 
 HF_MODEL = "google/siglip2-base-patch16-256"
 TEXT_LEN = 64
-LIBRARY = [Path(r"C:\Windows\Web\Wallpaper"), Path(r"C:\Windows\Web\Screen")]
-SWATCHES = {  # the colours the end-to-end run used (C:\TesseraTest\Library\Swatches)
-    "red": (220, 30, 30), "green": (30, 170, 60),
-    "blue": (30, 70, 220), "yellow": (240, 210, 20),
+WEB = Path(r"C:\Windows\Web")  # every picture except the 4K folder: 34 files, 32 distinct
+SWATCHES = {  # 512x512 solid PNGs, as in the end-to-end run of the release app
+    "red": (220, 20, 20), "green": (20, 180, 40),
+    "blue": (20, 40, 220), "yellow": (240, 220, 20),
 }
-LAKES = {"img28", "img29", "img30", "img31", "img102"}
-FOLDS = {"img14", "img19", "img32", "img33", "img34", "img35", "img100", "img104"}
-# (query, pictures that are a right first answer). img105 is a plain blue
-# lock screen, so it is as right an answer to "blue" as the swatch.
+LAKES = {"ThemeC-img28", "ThemeC-img29", "ThemeC-img30", "ThemeC-img31", "Screen-img102"}
+KEYBOARD = {f"touchkeyboard-TouchKeyboardTheme{t}00{i}" for t in ("Dark", "Light") for i in range(4)}
+GLOW = {"ThemeA-img22", "ThemeA-img20", "Screen-img101", "ThemeA-img23"}
+# The nine ground-truth queries of the README status section, exact strings
+# (coordinator, 2026-10-16): (query, right first answers, (k, set the top k
+# must lie in) or None). Screen-img105 is a plain blue lock screen.
 QUERIES = [
-    ("a calm lake with mountains", LAKES),
-    ("pine trees on the shore of a lake", {"img29"}),
-    ("a sunset over a lake", LAKES),
-    ("cherry blossom", {"img50"}),
-    ("folded fabric", FOLDS),
-    ("a solid red colour", {"red"}),
-    ("a solid green colour", {"green"}),
-    ("a solid blue colour", {"blue", "img105"}),
-    ("a solid yellow colour", {"yellow"}),
+    ("a lake with mountains at sunset", LAKES, (5, LAKES)),
+    ("pine trees by calm water", {"ThemeC-img29"}, None),
+    ("cherry blossom flowers", {"Spotlight-img50"}, None),
+    ("a solid red square", {"swatch-red"}, None),
+    ("a solid green square", {"swatch-green"}, None),
+    ("a solid blue square", {"swatch-blue", "Screen-img105"}, (2, {"swatch-blue", "Screen-img105"})),
+    ("a solid yellow square", {"swatch-yellow"}, None),
+    ("folds of silk fabric", KEYBOARD, (4, KEYBOARD)),
+    ("a glowing planet in dark space", {"ThemeA-img22"}, (4, GLOW)),
 ]
 # For --extra: no right answers, only agreement with the baseline. The
 # export's verification sentences and the search README's screenshot queries.
@@ -81,14 +85,13 @@ def library_images():
     from PIL import Image
 
     seen = {}
-    for root in LIBRARY:
-        for p in sorted(root.rglob("*")):
-            if p.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
-                continue
-            h = hashlib.sha256(p.read_bytes()).hexdigest()
-            seen.setdefault(h, p)  # a file's identity is its hash
-    items = [(p.stem, Image.open(p).convert("RGB")) for p in seen.values()]
-    items += [(name, Image.new("RGB", (800, 600), rgb)) for name, rgb in SWATCHES.items()]
+    for p in sorted(WEB.rglob("*")):
+        if p.suffix.lower() not in {".jpg", ".jpeg", ".png"} or "4K" in p.relative_to(WEB).parts:
+            continue
+        h = hashlib.sha256(p.read_bytes()).hexdigest()
+        seen.setdefault(h, p)  # a file's identity is its hash
+    items = [(f"{p.parent.name}-{p.stem}", Image.open(p).convert("RGB")) for p in seen.values()]
+    items += [(f"swatch-{name}", Image.new("RGB", (512, 512), rgb)) for name, rgb in SWATCHES.items()]
     return items
 
 
@@ -138,6 +141,92 @@ def torch_pair():
     return embed_images, embed_texts, {}
 
 
+def app_index_check(data_dir: Path, specs: list[str], processor, out_json: Path | None) -> int:
+    """Score each model's TEXT tower against the image vectors the app itself
+    stored (vectors/<modelId>.bin, int8 rows with one scale each), the way
+    the app scores them. Exact for a text-only change: the image side is the
+    app's own thumbnails through the app's own preprocessing. Pictures are
+    matched by sha256; swatches (512x512 PNGs) by their thumbnail's colour."""
+    import sqlite3
+
+    import onnxruntime as ort
+    from PIL import Image
+
+    db = sqlite3.connect(f"file:{(data_dir / 'library.db').as_posix()}?mode=ro", uri=True)
+    sha_to_id = {bytes(s).hex(): cid for cid, s in db.execute("SELECT content_id, sha256 FROM content")}
+    names: dict[int, str] = {}
+    for p in sorted(WEB.rglob("*")):
+        if p.suffix.lower() in {".jpg", ".jpeg", ".png"} and "4K" not in p.relative_to(WEB).parts:
+            cid = sha_to_id.get(hashlib.sha256(p.read_bytes()).hexdigest())
+            if cid is not None:
+                names.setdefault(cid, f"{p.parent.name}-{p.stem}")
+    for cid, sha in db.execute("SELECT content_id, hex(sha256) FROM content "
+                               "WHERE mime = 'image/png' AND width = 512 AND height = 512"):
+        sha = sha.lower()
+        thumb = data_dir / "thumbs" / sha[:2] / sha[2:4] / f"{sha}-thumb.webp"
+        rgb = np.asarray(Image.open(thumb).convert("RGB"), np.float32).reshape(-1, 3).mean(0)
+        names[cid] = "swatch-" + min(SWATCHES, key=lambda k: float(((rgb - SWATCHES[k]) ** 2).sum()))
+
+    (index_path,) = list((data_dir / "vectors").glob("*.bin"))
+    raw = index_path.read_bytes()
+    dims, count = np.frombuffer(raw, "<i4", 2, 8)
+    ids = np.frombuffer(raw, "<i8", count, 32)
+    scales = np.frombuffer(raw, "<f4", count, 32 + 8 * count)
+    rows = np.frombuffer(raw, np.int8, count * dims, 32 + 12 * count).reshape(count, dims).astype(np.float32)
+    keep = [i for i, cid in enumerate(ids) if int(cid) in names]
+    label = [names[int(ids[i])] for i in keep]
+    print(f"app index {index_path.name}: {count} vectors; {len(keep)} are the wallpapers and swatches")
+
+    queries = [q for q, *_ in QUERIES]
+    tok = processor.tokenizer(queries, padding="max_length", max_length=TEXT_LEN, truncation=True,
+                              return_tensors="np")["input_ids"].astype(np.int64)
+    report, results = {"index": str(index_path), "pictures": label, "models": {}}, {}
+    for spec in specs:
+        name, _, where = spec.partition("=")
+        text = Path(where.split(",")[-1]) if "," in where else Path(where) / "text.onnx"
+        st = ort.InferenceSession(str(text), providers=["CPUExecutionProvider"])
+        q = st.run(None, {st.get_inputs()[0].name: tok})[0].astype(np.float32)
+        q /= np.linalg.norm(q, axis=1, keepdims=True)  # the index normalises the query
+        results[name] = (q @ rows[keep].T) * scales[keep]  # dot with the int8 row, times its scale
+    base = specs[0].partition("=")[0]
+    ok = True
+    for name, scores in results.items():
+        qrows = []
+        for qi, (query, truth, must) in enumerate(QUERIES):
+            order = np.argsort(-scores[qi])
+            b_order = np.argsort(-results[base][qi])
+            top5 = [label[i] for i in order[:5]]
+            b_top5 = [label[i] for i in b_order[:5]]
+            top_k_right = must is None or {label[i] for i in order[: must[0]]} <= must[1]
+            qrows.append({"query": query, "first": top5[0], "firstScore": round(float(scores[qi, order[0]]), 4),
+                          "firstMargin": round(float(scores[qi, order[0]] - scores[qi, order[1]]), 4),
+                          "firstRight": top5[0] in truth, "topKRight": top_k_right,
+                          "sameFirstAsBaseline": top5[0] == b_top5[0], "top5": top5,
+                          "top5Scores": [round(float(scores[qi, i]), 4) for i in order[:5]],
+                          "top5Overlap": len(set(top5) & set(b_top5))})
+        report["models"][name] = {"queries": qrows,
+                                  "allRight": all(r["firstRight"] and r["topKRight"] for r in qrows),
+                                  "allSameFirst": all(r["sameFirstAsBaseline"] for r in qrows),
+                                  "top5OverlapMin": min(r["top5Overlap"] for r in qrows)}
+        ok &= report["models"][name]["allRight"] and report["models"][name]["allSameFirst"]
+    print(f"| Query | " + " | ".join(results) + " |")
+    print("|---|" + "---|" * len(results))
+    for qi, (query, *_) in enumerate(QUERIES):
+        cells = []
+        for name in results:
+            r = report["models"][name]["queries"][qi]
+            mark = "" if r["firstRight"] and r["topKRight"] else " ✗"
+            cells.append(f"{r['first']} {r['firstScore']:.3f}{mark} (margin {r['firstMargin']:.4f}), "
+                         f"top-5 {r['top5Overlap']}/5")
+        print(f"| {query} | " + " | ".join(cells) + " |")
+    for name in results:
+        m = report["models"][name]
+        print(f"{name:10} right {m['allRight']!s:5}  same first {m['allSameFirst']!s:5}  top-5 overlap min {m['top5OverlapMin']}/5")
+    if out_json:
+        out_json.write_text(json.dumps(report, indent=2))
+    return 0 if ok else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", action="append", required=True, help="name=folder or name=vision,text")
@@ -145,8 +234,14 @@ def main() -> int:
     ap.add_argument("--extra", type=Path, default=None,
                     help="a folder of more pictures (up to 200) for an agreement-only check "
                          f"with {len(EXTRA_QUERIES)} more queries")
+    ap.add_argument("--app-index", type=Path, default=None,
+                    help="an app data dir: rank with the image vectors the app stored, text towers only")
     ap.add_argument("--json", type=Path, default=None)
     args = ap.parse_args()
+    if args.app_index:
+        from transformers import AutoProcessor
+
+        return app_index_check(args.app_index, args.model, AutoProcessor.from_pretrained(HF_MODEL), args.json)
 
     from PIL import Image
     from transformers import AutoProcessor
@@ -154,7 +249,7 @@ def main() -> int:
     processor = AutoProcessor.from_pretrained(HF_MODEL)
     items = library_images()
     n_truth = len(items)
-    queries = [q for q, _ in QUERIES]
+    queries = [q for q, *_ in QUERIES]
     if args.extra:
         files = sorted(p for p in args.extra.rglob("*") if p.suffix.lower() in {".png", ".jpg", ".jpeg"})
         files = files[:: max(1, len(files) // 200)][:200]
@@ -191,23 +286,26 @@ def main() -> int:
         scores = all_scores[: len(QUERIES), :n_truth]
         names_t = names[:n_truth]
         rows = []
-        for qi, (q, truth) in enumerate(QUERIES):
+        for qi, (q, truth, must) in enumerate(QUERIES):
             order = np.argsort(-scores[qi])
             b_order = np.argsort(-b_scores[qi])
             top5, b_top5 = [names_t[i] for i in order[:5]], [names_t[i] for i in b_order[:5]]
             first = top5[0]
+            # Where the answer is a group (five lakes, both blues), the top k must stay in it.
+            top_k_right = must is None or {names_t[i] for i in order[: must[0]]} <= must[1]
             rows.append({
                 "query": q, "first": first, "firstScore": round(float(scores[qi, order[0]]), 4),
                 # How far ahead the first hit is; a near-tie can flip on rounding alone.
                 "firstMargin": round(float(scores[qi, order[0]] - scores[qi, order[1]]), 4),
-                "firstRight": first in truth, "sameFirstAsBaseline": first == b_top5[0],
+                "firstRight": first in truth, "topKRight": top_k_right,
+                "sameFirstAsBaseline": first == b_top5[0],
                 "top5": top5, "top5Overlap": len(set(top5) & set(b_top5)),
             })
         img_cos = cosine(img[:n_truth], b_img[:n_truth])
         txt_cos = cosine(txt[: len(QUERIES)], b_txt[: len(QUERIES)])
         m = {
             **sizes,
-            "allFirstRight": all(r["firstRight"] for r in rows),
+            "allFirstRight": all(r["firstRight"] and r["topKRight"] for r in rows),
             "allSameFirst": all(r["sameFirstAsBaseline"] for r in rows),
             "top5OverlapMin": min(r["top5Overlap"] for r in rows),
             "top5OverlapMean": round(sum(r["top5Overlap"] for r in rows) / len(rows), 2),
@@ -240,11 +338,11 @@ def main() -> int:
     print()
     print(f"| Query | " + " | ".join(n for n, *_ in models) + " |")
     print("|---|" + "---|" * len(models))
-    for qi, (q, _) in enumerate(QUERIES):
+    for qi, (q, *_) in enumerate(QUERIES):
         cells = []
         for name, *_ in models:
             r = report["models"][name]["queries"][qi]
-            mark = "" if r["firstRight"] else " ✗"
+            mark = "" if r["firstRight"] and r["topKRight"] else " ✗"
             cells.append(f"{r['first']} {r['firstScore']:.3f}{mark}, top-5 {r['top5Overlap']}/5")
         print(f"| {q} | " + " | ".join(cells) + " |")
     print()
