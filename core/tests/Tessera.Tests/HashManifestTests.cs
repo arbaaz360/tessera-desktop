@@ -15,8 +15,8 @@ public class HashManifestTests
     [Fact]
     public void Reads_a_well_formed_line()
     {
-        Assert.True(HashManifest.TryParseLine($"/reddit/sub/a.jpg\t{Sha}", out var p, out var sha));
-        Assert.Equal("/reddit/sub/a.jpg", p);
+        Assert.True(HashManifest.TryParseLine($"/photos/sub/a.jpg\t{Sha}", out var p, out var sha));
+        Assert.Equal("/photos/sub/a.jpg", p);
         Assert.Equal(Convert.FromHexString(Sha), sha);
     }
 

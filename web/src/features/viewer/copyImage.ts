@@ -4,7 +4,7 @@
  * Two browser constraints shape all of this, and neither is obvious:
  *
  * 1. SECURE CONTEXT. `navigator.clipboard` exists only on HTTPS or on
- *    localhost. Reaching this app as `http://samurai.local:2283` - a perfectly
+ *    localhost. Reaching this app as `http://nas.local:2283` - a perfectly
  *    ordinary way to open it on the LAN - leaves the API undefined. The old
  *    Album Sentinel browser extension existed partly to work around exactly
  *    this. So the UI must ASK whether copying is possible before offering it,

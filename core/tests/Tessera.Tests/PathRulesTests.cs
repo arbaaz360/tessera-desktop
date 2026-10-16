@@ -35,17 +35,17 @@ public class PathRulesTests
     }
 
     [Theory]
-    [InlineData("/reddit", "/reddit/DesiVixens/x.jpg", "DesiVixens/x.jpg")]
-    [InlineData("/reddit", "/reddit/x.jpg", "x.jpg")]
-    [InlineData("/reddit", "/reddit", "")]
+    [InlineData("/photos", "/photos/Travel/x.jpg", "Travel/x.jpg")]
+    [InlineData("/photos", "/photos/x.jpg", "x.jpg")]
+    [InlineData("/photos", "/photos", "")]
     public void RelativeTo_strips_the_root(string root, string abs, string expected) =>
         Assert.Equal(expected, PathRules.RelativeTo(root, abs));
 
     [Theory]
-    [InlineData("/reddit", "/reddit-staging/x.jpg")]
-    [InlineData("/reddit", "/reddits/x.jpg")]
-    [InlineData("/reddit", "/simpcity/x.jpg")]
-    [InlineData("/reddit", "/x.jpg")]
+    [InlineData("/photos", "/photos-staging/x.jpg")]
+    [InlineData("/photos", "/photoss/x.jpg")]
+    [InlineData("/photos", "/archive/x.jpg")]
+    [InlineData("/photos", "/x.jpg")]
     public void RelativeTo_refuses_a_root_that_merely_shares_a_prefix(string root, string abs)
     {
         // THE IMPORTANT CASE. A StartsWith test passes all of these, and the
@@ -57,12 +57,12 @@ public class PathRulesTests
     [Fact]
     public void RelativeTo_matches_regardless_of_separator()
     {
-        Assert.Equal("a/b.jpg", PathRules.RelativeTo("/reddit", @"\reddit\a\b.jpg"));
-        Assert.Equal("a/b.jpg", PathRules.RelativeTo(@"\reddit", "//reddit//a/b.jpg"));
+        Assert.Equal("a/b.jpg", PathRules.RelativeTo("/photos", @"\photos\a\b.jpg"));
+        Assert.Equal("a/b.jpg", PathRules.RelativeTo(@"\photos", "//photos//a/b.jpg"));
     }
 
     [Theory]
-    [InlineData("DesiVixens/x.jpg", "DesiVixens")]
+    [InlineData("Travel/x.jpg", "Travel")]
     [InlineData("a/b/c.jpg", "a")]
     [InlineData("x.jpg", null)]
     [InlineData("", null)]
@@ -85,7 +85,7 @@ public class PathRulesTests
         // has teeth by asserting the property it depends on: a sibling prefix
         // must not resolve. If someone "simplifies" RelativeTo to StartsWith,
         // this fails loudly instead of the system quietly misfiling.
-        Assert.NotNull(PathRules.RelativeTo("/reddit", "/reddit/a"));
-        Assert.Null(PathRules.RelativeTo("/reddit", "/reddit2/a"));
+        Assert.NotNull(PathRules.RelativeTo("/photos", "/photos/a"));
+        Assert.Null(PathRules.RelativeTo("/photos", "/photos2/a"));
     }
 }

@@ -48,8 +48,8 @@ public static partial class PathRules
     /// or null when it is not below it at all.
     /// </summary>
     /// <remarks>
-    /// Compared segment-wise rather than with StartsWith: "/reddit" must not
-    /// match "/reddit-staging", which a plain prefix test happily would.
+    /// Compared segment-wise rather than with StartsWith: "/photos" must not
+    /// match "/photos-staging", which a plain prefix test happily would.
     /// </remarks>
     public static string? RelativeTo(string root, string absolute)
     {
@@ -82,23 +82,23 @@ public static partial class PathRules
     /// </summary>
     /// <remarks>
     /// A guard that cannot fire reads as protection. The known-negative here is
-    /// the important half: a prefix test that accepts "/reddit-staging" for
-    /// root "/reddit" would file another corpus into the wrong account, and
+    /// the important half: a prefix test that accepts "/photos-staging" for
+    /// root "/photos" would file another corpus into the wrong account, and
     /// would look like it was working.
     /// </remarks>
     public static void SelfTest()
     {
-        Check(Canonical(@"\reddit\a\b.jpg") == "/reddit/a/b.jpg", "backslashes");
-        Check(Canonical("//reddit//a/b.jpg") == "/reddit/a/b.jpg", "repeated slashes");
-        Check(Canonical("/reddit/") == "/reddit", "trailing slash");
+        Check(Canonical(@"\photos\a\b.jpg") == "/photos/a/b.jpg", "backslashes");
+        Check(Canonical("//photos//a/b.jpg") == "/photos/a/b.jpg", "repeated slashes");
+        Check(Canonical("/photos/") == "/photos", "trailing slash");
         Check(Canonical(null) == "", "null");
 
-        Check(RelativeTo("/reddit", "/reddit/DesiVixens/x.jpg") == "DesiVixens/x.jpg", "relative");
-        Check(RelativeTo("/reddit", "/reddit") == "", "root itself");
-        Check(RelativeTo("/reddit", "/reddit-staging/x.jpg") is null, "sibling prefix must NOT match");
-        Check(RelativeTo("/reddit", "/simpcity/x.jpg") is null, "unrelated root");
+        Check(RelativeTo("/photos", "/photos/Travel/x.jpg") == "Travel/x.jpg", "relative");
+        Check(RelativeTo("/photos", "/photos") == "", "root itself");
+        Check(RelativeTo("/photos", "/photos-staging/x.jpg") is null, "sibling prefix must NOT match");
+        Check(RelativeTo("/photos", "/archive/x.jpg") is null, "unrelated root");
 
-        Check(TopFolder("DesiVixens/x.jpg") == "DesiVixens", "top folder");
+        Check(TopFolder("Travel/x.jpg") == "Travel", "top folder");
         Check(TopFolder("x.jpg") is null, "file at root has no folder");
     }
 
