@@ -218,6 +218,64 @@ public class EmbedderTests : IClassFixture<ModelFixture>
         Assert.True(worstImage >= 0.999f, $"images on {_models.Gpu.Device} drift from CPU: {worstImage}");
     }
 
+    /// <summary>
+    /// CoreML's batching, run on the CPU: the vision session fixed at eight
+    /// images and the text session at one sentence, short batches padded,
+    /// long ones chunked. The vectors must be the dynamic sessions'.
+    /// </summary>
+    [Fact]
+    public void FixedBatchesMatchDynamicBatches()
+    {
+        var m = Model();
+        if (m is null) return;
+        var options = new SearchOptions { ModelsDir = Path.GetDirectoryName(TestPaths.ModelDir)!, PreferGpu = false };
+        using var fixedShapes = new SiglipEmbedder(options, new ModelStore(options), null, ModelManifest.Embedded()) { FixedShapesOnCpu = true };
+        fixedShapes.LoadFromDirectory(TestPaths.ModelDir!);
+        Assert.Null(m.FixedImageBatch);
+        Assert.Equal(SiglipEmbedder.CoreMlImageBatch, fixedShapes.FixedImageBatch);
+
+        var bitmaps = Enumerable.Range(0, 11).Select(i => Swatch((byte)(i * 23), (byte)(250 - i * 20), (byte)(40 + i * 17))).ToList();
+        try
+        {
+            float worst = 1;
+            foreach (int n in new[] { 1, 3, 8, 11 })
+            {
+                var batch = bitmaps.Take(n).ToList();
+                float[][] dynamic = m.EmbedImages(batch);
+                float[][] padded = fixedShapes.EmbedImages(batch);
+                Assert.Equal(n, padded.Length);
+                for (int i = 0; i < n; i++) worst = Math.Min(worst, Cosine(dynamic[i], padded[i]));
+            }
+            string[] sentences = ["a red square", "a photo of a mountain lake at sunrise", "RED"];
+            float[][] texts = fixedShapes.EmbedTexts(sentences);
+            float worstText = sentences.Select((s, i) => Cosine(m.EmbedText(s), texts[i])).Min();
+            _out.WriteLine($"fixed vs dynamic batches: image cosine min {worst:F6}, text cosine min {worstText:F6}");
+            Assert.True(worst >= 0.99999f, $"padded batches drift: {worst}");
+            Assert.True(worstText >= 0.99999f, $"one-sentence runs drift: {worstText}");
+        }
+        finally
+        {
+            foreach (var b in bitmaps) b.Dispose();
+        }
+    }
+
+    /// <summary>The manifest names the graphs' free batch dimension, which CoreML fixes by name.</summary>
+    [Fact]
+    public void ManifestNamesTheGraphsBatchDimension()
+    {
+        if (TestPaths.ModelDir is null) { _out.WriteLine("skipped: no local model export"); return; }
+        var manifest = ModelManifest.Embedded();
+        foreach (var (file, input) in new[] { ("vision.onnx", manifest.Inputs.Vision), ("text.onnx", manifest.Inputs.Text) })
+        {
+            using var so = new Microsoft.ML.OnnxRuntime.SessionOptions { GraphOptimizationLevel = Microsoft.ML.OnnxRuntime.GraphOptimizationLevel.ORT_DISABLE_ALL };
+            using var session = new Microsoft.ML.OnnxRuntime.InferenceSession(Path.Combine(TestPaths.ModelDir, file), so);
+            Assert.True(session.InputMetadata.ContainsKey(input.Name), $"{file} has no input {input.Name}");
+            string dim = session.InputMetadata[input.Name].SymbolicDimensions[0];
+            _out.WriteLine($"{file}: {input.Name} batch dimension '{dim}', manifest '{input.BatchDimension}'");
+            Assert.Equal(input.BatchDimension, dim);
+        }
+    }
+
     [Fact]
     public void ConcurrentEmbedsAreStable()
     {

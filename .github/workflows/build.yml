@@ -260,11 +260,13 @@ jobs:
   # The parts on a Mac without the shell: the core's and the search
   # library's tests, the real model through ModelStore on CoreML and on the
   # CPU, and the published core driven through the contract's handshake
-  # (src-tauri/tools/smoke). The numbers land in the job summary.
+  # (src-tauri/tools/smoke). The numbers land in the job summary. CoreML
+  # compiles the model three times here (tests, search, core: about two
+  # minutes per tower on this runner), hence the timeout.
   smoke-macos:
     name: smoke (macos-latest)
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     defaults:
       run:
         shell: bash
@@ -319,8 +321,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: dotnet test core
 
-      # With the model present the embedder tests run too (CPU against the
-      # PyTorch reference vectors, and CoreML when it loads).
+      # With the model present the embedder tests run too: CPU against the
+      # reference vectors, and CoreML against the CPU (GpuMatchesCpu).
       - name: dotnet test search
         if: ${{ !cancelled() }}
         run: |
@@ -329,6 +331,8 @@ jobs:
           fi
           dotnet test search --logger "console;verbosity=detailed"
 
+      # Device must be CoreML with PreferGpu; red first on both devices;
+      # CoreML and CPU vectors within cosine 0.999; cold and warm loads.
       - name: Search with the real model (CoreML and CPU)
         if: ${{ !cancelled() && steps.model.outcome == 'success' }}
         run: |
@@ -349,7 +353,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           models=()
-          [ "${{ steps.model.outcome }}" = success ] && models=(--models-from "$HOME/tessera-models" --embeddings)
+          [ "${{ steps.model.outcome }}" = success ] && models=(--models-from "$HOME/tessera-models" --embeddings --expect-device coreml)
           "$RUNNER_TEMP/smoke/tessera-smoke" core "$RUNNER_TEMP/core/tessera-core" \
             "$RUNNER_TEMP/library" "$RUNNER_TEMP/data" "${models[@]}" --timeout 600
 

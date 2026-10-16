@@ -68,8 +68,14 @@ internal static class SearchSmoke
 
     /// <param name="loadFrom">
     /// A folder holding vision.onnx, text.onnx and tokenizer.model to load as
-    /// they are, without the manifest's hashes: how the CoreML probe tries a
-    /// rewritten model. Null loads through the store, as the core does.
+    /// they are, without the manifest's hashes. Null loads through the store,
+    /// as the core does.
+    /// </param>
+    /// <param name="requireGpu">
+    /// PreferGpu=true must land on this platform's GPU provider: CoreML on
+    /// macOS, DirectML on Windows. On CoreML the compiled-model cache is
+    /// cleared first, so the first load is a buyer's first launch and a
+    /// second embedder shows the warm start.
     /// </param>
     public static async Task<int> RunAsync(string modelsDir, bool requireGpu, string? loadFrom)
     {
@@ -80,6 +86,16 @@ internal static class SearchSmoke
         using var logs = Logs();
         using var store = new ModelStore(Options(modelsDir, manifest, false), null, logs.CreateLogger<ModelStore>());
         report.Number("model", manifest.ModelId);
+
+        if (requireGpu && OperatingSystem.IsMacOS())
+        {
+            var cache = Path.Combine(loadFrom ?? store.DirectoryFor(manifest.ModelId), "coreml");
+            if (Directory.Exists(cache))
+            {
+                Directory.Delete(cache, recursive: true);
+                Report.Line($"cleared {cache}: the first load compiles, as on a buyer's first launch");
+            }
+        }
 
         // Vectors of the 3 swatches and the sentence, per device, to compare.
         var vectors = new Dictionary<bool, float[][]>();
@@ -99,10 +115,32 @@ internal static class SearchSmoke
 
         if (vectors.Count == 2)
         {
-            var agreement = Enumerable.Range(0, vectors[true].Length)
-                .Select(i => TensorPrimitives.CosineSimilarity(vectors[true][i], vectors[false][i])).Min();
-            report.Number("GPU vs CPU vectors, lowest cosine (3 swatches + sentence)", agreement, "", 5);
-            report.Check(agreement > 0.98, "GPU and CPU vectors agree (cosine > 0.98)", $"{agreement:F5}");
+            var cosines = Enumerable.Range(0, vectors[true].Length)
+                .Select(i => TensorPrimitives.CosineSimilarity(vectors[true][i], vectors[false][i])).ToArray();
+            report.Number("GPU vs CPU vectors, cosine (red, green, blue, sentence)", string.Join(", ", cosines.Select(c => c.ToString("F5", System.Globalization.CultureInfo.InvariantCulture))));
+            report.Check(cosines.Min() >= 0.999, "GPU and CPU vectors agree (cosine >= 0.999)", $"{cosines.Min():F5}");
+        }
+
+        if (requireGpu && OperatingSystem.IsMacOS())
+        {
+            // The same model again, now from the cache the first load wrote.
+            using var warm = new SiglipEmbedder(Options(modelsDir, manifest, true), store, logs.CreateLogger<SiglipEmbedder>(), manifest);
+            var sw = Stopwatch.StartNew();
+            if (loadFrom is null)
+            {
+                await warm.EnsureReadyAsync(null, CancellationToken.None);
+            }
+            else
+            {
+                warm.LoadFromDirectory(loadFrom);
+            }
+
+            report.Number("PreferGpu=true: second load (verify + sessions, CoreML cache warm)", sw.Elapsed.TotalSeconds, "s");
+            report.Check(warm.Device == EmbedDevice.CoreML, "the second load is on CoreML too", $"{warm.Device}");
+            var cache = Path.Combine(warm.ModelDirectory!, "coreml");
+            var files = Directory.Exists(cache) ? Directory.GetFiles(cache, "*", SearchOption.AllDirectories) : [];
+            report.Number("CoreML cache", $"{files.Length} files, {files.Sum(f => new FileInfo(f).Length) / 1048576.0:F0} MB in "
+                + string.Join(", ", Directory.Exists(cache) ? Directory.GetDirectories(cache).Select(Path.GetFileName) : []));
         }
 
         return report.Finish();
@@ -129,12 +167,14 @@ internal static class SearchSmoke
             }
 
             var device = embedder.Device?.ToString() ?? "none";
-            report.Number($"{label}: Device", device + (embedder.DeviceName is { } n ? $" ({n})" : ""));
-            report.Number($"{label}: load (verify + sessions)", sw.Elapsed.TotalSeconds, "s");
+            report.Number($"{label}: Device", device + (embedder.DeviceName is { } n ? $" ({n})" : "")
+                + (embedder.FixedImageBatch is { } b ? $", batch fixed at {b}" : ""));
+            report.Number($"{label}: load (verify + sessions{(preferGpu && embedder.Device == EmbedDevice.CoreML ? ", CoreML compile" : "")})", sw.Elapsed.TotalSeconds, "s");
             if (preferGpu && requireGpu)
             {
-                report.Check(embedder.Device is not null and not EmbedDevice.Cpu,
-                    $"{label} chose a GPU provider", $"Device = {device}; the log above says why if it fell back");
+                var expected = OperatingSystem.IsMacOS() ? EmbedDevice.CoreML : EmbedDevice.DirectML;
+                report.Check(embedder.Device == expected,
+                    $"{label} chose {expected}", $"Device = {device}; the log above says why if it fell back");
             }
 
             // Red, green, blue and the sentence.

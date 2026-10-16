@@ -22,6 +22,12 @@ Two size options, each measured on its own (see models/README.md):
                           quantised per call). A new modelId, because image
                           vectors change and stored indexes go stale.
 
+Core ML (macOS) needs two things the plain export lacks, both applied by
+models/coreml_compat.py and checked by its audit before anything is written:
+explicit zero `pads` on the patch-embedding Conv instead of `auto_pad=VALID`
+(model v3), and the input shapes in the manifest, so the library can fix the
+batch dimension by name.
+
 Also written to the output dir:
 
     tokenizer.model   the Gemma SentencePiece model, copied from the checkpoint
@@ -61,8 +67,8 @@ import torch.nn.functional as F
 
 HF_MODEL = "google/siglip2-base-patch16-256"
 MODEL_ID = "siglip2-base-patch16-256"
-RELEASE_TAG = "models-siglip2-base-v2"
-MANIFEST_VERSION = 2
+RELEASE_TAG = "models-siglip2-base-v3"
+MANIFEST_VERSION = 3
 # Public, model-only repository: buyers download with no token (owner, 2026-10-16).
 REPO = "arbaaz360/siglip2-base-onnx"
 OPSET = 17
@@ -72,6 +78,11 @@ DIMS = 768
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "out"
+SHIPPED_MANIFEST = HERE / "manifest.json"
+SHIPPED_FIXTURES = HERE.parent / "search" / "tests" / "Tessera.Desktop.Search.Tests" / "fixtures" / "expected.json"
+# Image vectors that agree with the shipped model's at least this well keep
+# its modelId: stored indexes stay valid.
+SAME_SPACE_COSINE = 0.99999
 
 
 # --------------------------------------------------------------------------
@@ -494,6 +505,12 @@ def main() -> int:
     ap.add_argument("--compare", action="store_true",
                     help="build and verify every variant, whatever is published")
     ap.add_argument("--release", default=RELEASE_TAG, help="release tag the manifest URLs name")
+    ap.add_argument("--text-from", type=Path, default=None,
+                    help="publish this text.onnx instead of the one exported here (verified the same "
+                         "way); keeps a released text tower byte for byte")
+    ap.add_argument("--model-id", default=None,
+                    help="the manifest's modelId; by default the shipped one when the image vectors "
+                         f"agree with its fixtures to cosine >= {SAME_SPACE_COSINE}, else the export fails")
     args = ap.parse_args()
 
     out: Path = args.out
@@ -548,9 +565,15 @@ def main() -> int:
                          {"input_ids": {0: "batch"}, "text_embeds": {0: "batch"}})
 
     import onnx
+    sys.path.insert(0, str(HERE))
+    from coreml_compat import audit, explicit_conv_pads
 
     for p in (vision_fp32, text_fp32):
         m = onnx.load(str(p))
+        changed = explicit_conv_pads(m)
+        if changed:
+            onnx.save(m, str(p))
+            log(f"{p.name}: " + "; ".join(changed))
         onnx.checker.check_model(m)
         log(f"{p.name}: opset {[o.version for o in m.opset_import if o.domain in ('', 'ai.onnx')]}, "
             f"{p.stat().st_size / 1e6:.1f} MB, {len(m.graph.node)} nodes")
@@ -599,6 +622,12 @@ def main() -> int:
     elif args.vision_matmul == "int8w":
         publish_v = quantised["int8weights"][0]
     publish_t = quantised["int8table"][1] if args.text_table == "int8" else base_t
+    if args.text_from:
+        kept = out / "text.kept.onnx"
+        shutil.copyfile(args.text_from, kept)
+        quantised["kept_text"] = (base_v, kept)
+        publish_t = kept
+        log(f"text tower: {args.text_from} ({sha256_of(kept)[:16]}…) instead of the export")
 
     # ---- verification inputs ---------------------------------------------
     images = synthetic_images()
@@ -700,6 +729,16 @@ def main() -> int:
     shutil.copyfile(publish_t, out / "text.onnx")
     log(f"published: {publish_v.name} as vision.onnx, {publish_t.name} as text.onnx")
     shutil.copyfile(snap / "tokenizer.model", out / "tokenizer.model")
+    findings = {}
+    for name in ("vision.onnx", "text.onnx"):
+        findings[name] = audit(onnx.load(str(out / name), load_external_data=False))
+        for line in findings[name]:
+            log(f"coreml audit {name}: {line}")
+        implicit = [line for line in findings[name] if "implicit padding" in line or "has auto_pad" in line]
+        if implicit:
+            raise SystemExit(f"{name}: Core ML refuses implicit padding: {implicit}")
+    verify["coreml_audit"] = findings
+    (out / "verify.json").write_text(json.dumps(verify, indent=2))
     if not args.keep_fp32:
         vision_fp32.unlink(missing_ok=True)
         text_fp32.unlink(missing_ok=True)
@@ -727,6 +766,36 @@ def main() -> int:
         "texts": [{"text": s, "inputIds": [int(x) for x in i], "embedding": [float(x) for x in e]}
                   for s, i, e in zip(fsent, fids, ftxt)],
     }
+    # ---- the shipped model's vectors on the same fixtures -------------------
+    # Same pictures, same preprocessing, same runtime: what changes is the
+    # graph. Agreement at SAME_SPACE_COSINE keeps the modelId, so stored
+    # indexes stay valid; below it the vectors are a new space.
+    shipped = json.loads(SHIPPED_MANIFEST.read_text()) if SHIPPED_MANIFEST.exists() else None
+    model_id = args.model_id
+    if SHIPPED_FIXTURES.exists() and shipped:
+        before = json.loads(SHIPPED_FIXTURES.read_text())
+        old_img = {f["file"]: np.array(f["embedding"], np.float32) for f in before["images"]}
+        old_txt = {t["text"]: np.array(t["embedding"], np.float32) for t in before["texts"]}
+        img_cos = {f"{n}.png": float(cosine(e.astype(np.float32), old_img[f"{n}.png"]))
+                   for (n, _), e in zip(fixture_images, femb) if f"{n}.png" in old_img}
+        txt_cos = [float(cosine(e.astype(np.float32), old_txt[t])) for t, e in zip(fsent, ftxt) if t in old_txt]
+        verify["against_shipped"] = {"release": shipped.get("release"), "modelId": shipped["modelId"],
+                                     "image_cosines": img_cos, "image_cosine_min": min(img_cos.values()),
+                                     "text_cosine_min": min(txt_cos)}
+        log(f"against {shipped.get('release')}: image cosine min {min(img_cos.values()):.7f} "
+            f"({', '.join(f'{k} {v:.7f}' for k, v in img_cos.items())}); text cosine min {min(txt_cos):.7f}")
+        same_space = min(img_cos.values()) >= SAME_SPACE_COSINE
+        if model_id is None and args.vision_matmul == "fp16":
+            if not same_space:
+                raise SystemExit(f"image vectors moved (cosine {min(img_cos.values()):.7f} < {SAME_SPACE_COSINE}) "
+                                 f"against {shipped.get('release')}: pass --model-id with a new id")
+            model_id = shipped["modelId"]
+        (out / "verify.json").write_text(json.dumps(verify, indent=2))
+    if model_id is None:
+        # Image vectors change only when the vision tower does; a new id makes
+        # the core rebuild every stored index instead of mixing two spaces.
+        model_id = MODEL_ID + ("-q8" if args.vision_matmul != "fp16" else "")
+
     (fx / "expected.json").write_text(json.dumps(fixtures))
     log(f"fixtures: {len(fixture_images)} images, {len(fsent)} sentences -> {fx}")
 
@@ -746,9 +815,7 @@ def main() -> int:
     elif args.vision_matmul == "int8w":
         weights += "; vision MatMul weights int8, per-column scale"
     manifest = {
-        # Image vectors change only when the vision tower does; a new id makes
-        # the core rebuild every stored index instead of mixing two spaces.
-        "modelId": MODEL_ID + ("-q8" if args.vision_matmul != "fp16" else ""),
+        "modelId": model_id,
         "version": MANIFEST_VERSION,
         "source": HF_MODEL,
         "licence": "Apache-2.0",
@@ -757,8 +824,10 @@ def main() -> int:
         "imageSize": IMAGE_SIZE,
         "textLength": TEXT_LEN,
         "weights": weights,
-        "inputs": {"vision": {"name": vin.name, "type": vin.type},
-                   "text": {"name": tin.name, "type": tin.type}},
+        # Shapes as the graphs declare them; the library fixes the free batch
+        # dimension by this name for CoreML.
+        "inputs": {"vision": {"name": vin.name, "type": vin.type, "shape": vin.shape},
+                   "text": {"name": tin.name, "type": tin.type, "shape": tin.shape}},
         "tokenizer": tokenizer_facts,
         "files": files,
     }

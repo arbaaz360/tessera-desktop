@@ -4,7 +4,7 @@ using Tessera.Smoke;
 // tessera-smoke model  <models-dir>
 // tessera-smoke search <models-dir> [--require-gpu] [--load-from <model-dir>]
 // tessera-smoke coreml <tower.onnx> [--batch 8] [--units ALL] [--format MLProgram] [--cache <dir>] [--loads 1] [--label <name>]
-// tessera-smoke core   <core-exe> <library-dir> <data-dir> [--models-from <models-dir>] [--embeddings] [--timeout <s>]
+// tessera-smoke core   <core-exe> <library-dir> <data-dir> [--models-from <models-dir>] [--embeddings] [--expect-device coreml] [--timeout <s>]
 //
 // Each command prints what it checked and the numbers, appends a Markdown
 // table to $GITHUB_STEP_SUMMARY when it is set, and exits 1 on any failed check.
@@ -24,6 +24,7 @@ try
             exe, library, data,
             Args.String(args, "--models-from"),
             args.Contains("--embeddings"),
+            Args.String(args, "--expect-device"),
             TimeSpan.FromSeconds(Args.Int(args, "--timeout", 600))),
         _ => Usage(),
     };
@@ -42,7 +43,7 @@ static int Usage()
           tessera-smoke model  <models-dir>
           tessera-smoke search <models-dir> [--require-gpu] [--load-from <model-dir>]
           tessera-smoke coreml <tower.onnx> [--batch 8] [--units ALL] [--format MLProgram] [--cache <dir>] [--loads 1] [--label <name>]
-          tessera-smoke core   <core-exe> <library-dir> <data-dir> [--models-from <models-dir>] [--embeddings] [--timeout <s>]
+          tessera-smoke core   <core-exe> <library-dir> <data-dir> [--models-from <models-dir>] [--embeddings] [--expect-device coreml] [--timeout <s>]
         """);
     return 2;
 }

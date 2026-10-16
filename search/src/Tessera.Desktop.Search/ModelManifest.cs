@@ -20,6 +20,7 @@ public sealed class ModelManifest
     [JsonPropertyName("imageSize")] public int ImageSize { get; init; } = 256;
     [JsonPropertyName("textLength")] public int TextLength { get; init; } = 64;
     [JsonPropertyName("weights")] public string? Weights { get; init; }
+    [JsonPropertyName("inputs")] public ModelInputs Inputs { get; init; } = new();
     [JsonPropertyName("tokenizer")] public TokenizerFacts Tokenizer { get; init; } = new();
     [JsonPropertyName("files")] public IReadOnlyList<ModelFile> Files { get; init; } = Array.Empty<ModelFile>();
 
@@ -64,6 +65,30 @@ public sealed class ModelFile
     [JsonPropertyName("bytes")] public long Bytes { get; init; }
     [JsonPropertyName("sha256")] public required string Sha256 { get; init; }
     [JsonPropertyName("url")] public required string Url { get; init; }
+}
+
+/// <summary>Each tower's input as the export found it in the graph.</summary>
+public sealed class ModelInputs
+{
+    [JsonPropertyName("vision")] public ModelInput Vision { get; init; } = new() { Name = "pixel_values" };
+    [JsonPropertyName("text")] public ModelInput Text { get; init; } = new() { Name = "input_ids" };
+}
+
+public sealed class ModelInput
+{
+    [JsonPropertyName("name")] public string Name { get; init; } = "";
+    [JsonPropertyName("type")] public string? Type { get; init; }
+
+    /// <summary>Dimensions as the graph declares them: a number, or the name of a free dimension.</summary>
+    [JsonPropertyName("shape")] public IReadOnlyList<JsonElement>? Shape { get; init; }
+
+    /// <summary>
+    /// The name of the free batch dimension, which CoreML needs fixed
+    /// (<c>AddFreeDimensionOverrideByName</c>). Manifests before model v3 do
+    /// not list shapes; their exports named it <c>batch</c>.
+    /// </summary>
+    [JsonIgnore]
+    public string BatchDimension => Shape is [{ ValueKind: JsonValueKind.String } first, ..] ? first.GetString()! : "batch";
 }
 
 /// <summary>How the text tower's input ids are built. Mirrors the HF tokenizer the export verified against.</summary>

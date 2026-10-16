@@ -21,7 +21,7 @@ internal static class CoreSmoke
         ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".heif", ".avif",
     };
 
-    public static async Task<int> RunAsync(string exe, string library, string data, string? modelsFrom, bool embeddings, TimeSpan timeout)
+    public static async Task<int> RunAsync(string exe, string library, string data, string? modelsFrom, bool embeddings, string? expectDevice, TimeSpan timeout)
     {
         var report = new Report($"Core on {System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier}");
         exe = Path.GetFullPath(exe);
@@ -41,7 +41,8 @@ internal static class CoreSmoke
         if (modelsFrom is not null)
         {
             // The model the search step downloaded, so the core loads it
-            // instead of fetching 755 MB again. File.Copy clones on APFS.
+            // instead of fetching it again. File.Copy clones on APFS. Not the
+            // CoreML cache: the core compiles as on a buyer's first launch.
             var copied = CopyTree(Path.GetFullPath(modelsFrom), Path.Combine(data, "models"));
             report.Number("model files placed in <data>/models", copied.ToString());
         }
@@ -79,7 +80,7 @@ internal static class CoreSmoke
 
         try
         {
-            return await DriveAsync(report, core, sw, token, origin, library, data, pictures.Count, embeddings, timeout, before, stderr);
+            return await DriveAsync(report, core, sw, token, origin, library, data, pictures.Count, embeddings, expectDevice, timeout, before, stderr);
         }
         finally
         {
@@ -92,7 +93,7 @@ internal static class CoreSmoke
 
     private static async Task<int> DriveAsync(
         Report report, Process core, Stopwatch sw, string token, string origin, string library, string data,
-        int expected, bool embeddings, TimeSpan timeout, Dictionary<string, (long, DateTime)> before, List<string> stderr)
+        int expected, bool embeddings, string? expectDevice, TimeSpan timeout, Dictionary<string, (long, DateTime)> before, List<string> stderr)
     {
         // ---------------------------------------------------------------- ready
         string? line;
@@ -196,6 +197,11 @@ internal static class CoreSmoke
             var embedSeconds = sw.Elapsed.TotalSeconds;
             var status = await http.GetFromJsonAsync<JsonNode>("/api/search/status");
             report.Number("search device", $"{status?["device"]}");
+            if (expectDevice is not null)
+            {
+                report.Check((string?)status?["device"] == expectDevice, $"/api/search/status reports device {expectDevice}", $"{status?["device"]}");
+            }
+
             report.Number("embeddings done / failed / pending", $"{state.EmbedDone} / {state.EmbedFailed} / {state.EmbedPending}");
             report.Number("thumbnails done to last embedding (model load included)", embedSeconds, "s");
             report.Check(state.EmbedDone == expected && state.EmbedFailed == 0, "every picture has an embedding",
@@ -344,6 +350,11 @@ internal static class CoreSmoke
         var n = 0;
         foreach (var file in Directory.GetFiles(from, "*", SearchOption.AllDirectories))
         {
+            if (Path.GetRelativePath(from, file).Split(Path.DirectorySeparatorChar).Contains("coreml"))
+            {
+                continue;
+            }
+
             var target = Path.Combine(to, Path.GetRelativePath(from, file));
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
             File.Copy(file, target);
