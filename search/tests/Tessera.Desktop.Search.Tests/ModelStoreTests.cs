@@ -178,14 +178,14 @@ public class ModelStoreTests : IDisposable
 
     /// <summary>
     /// The real thing: downloads the published release into a temp dir and
-    /// verifies it. Runs only with TESSERA_MODELS_TOKEN set (the repository
-    /// is private) and TESSERA_REAL_DOWNLOAD=1, because it moves 755 MB.
+    /// verifies it, the way a buyer's first run does (the model repository
+    /// is public, so no token). Runs only with TESSERA_REAL_DOWNLOAD=1,
+    /// because it moves the whole model.
     /// </summary>
     [Fact]
     public async Task RealReleaseDownloadsAndVerifies()
     {
-        if (Environment.GetEnvironmentVariable("TESSERA_REAL_DOWNLOAD") != "1"
-            || string.IsNullOrEmpty(Environment.GetEnvironmentVariable(ModelStore.TokenEnvVar)))
+        if (Environment.GetEnvironmentVariable("TESSERA_REAL_DOWNLOAD") != "1")
             return;
         var manifest = ModelManifest.Embedded();
         string dir = Path.Combine(Path.GetTempPath(), "tessera-real-download");
@@ -210,7 +210,10 @@ public class ModelStoreTests : IDisposable
     public void EmbeddedManifestIsTheShippedOne()
     {
         var m = ModelManifest.Embedded();
+        // v2 changed only the text tower, so image vectors and stored indexes stay valid under the same id.
         Assert.Equal("siglip2-base-patch16-256", m.ModelId);
+        Assert.Equal(2, m.Version);
+        Assert.Equal("models-siglip2-base-v2", m.Release);
         Assert.Equal(768, m.Dimensions);
         Assert.Equal(256, m.ImageSize);
         Assert.Equal(64, m.Tokenizer.MaxLength);
@@ -219,8 +222,10 @@ public class ModelStoreTests : IDisposable
         {
             Assert.Equal(64, f.Sha256.Length);
             Assert.True(f.Bytes > 0);
-            Assert.StartsWith("https://github.com/arbaaz360/tessera-desktop/releases/download/", f.Url, StringComparison.Ordinal);
+            // The public, model-only repository: a buyer downloads with no token.
+            Assert.Equal($"https://github.com/arbaaz360/siglip2-base-onnx/releases/download/{m.Release}/{f.Name}", f.Url);
         });
-        Assert.True(m.TotalBytes > 700_000_000);
+        // v1 was 755 MB; the int8 token table took 196 MB off the text tower.
+        Assert.InRange(m.TotalBytes, 500_000_000, 600_000_000);
     }
 }
