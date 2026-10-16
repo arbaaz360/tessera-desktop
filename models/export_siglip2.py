@@ -34,6 +34,12 @@ models/coreml_compat.py (model v3):
     the input shapes in the manifest, so the library can fix the batch
     dimension by name.
 
+Float32 arithmetic costs DirectML 40% (models/README.md), so from manifest
+version 4 a file may be listed per platform: --vision-from names an earlier
+release's vision.onnx for some platforms (Windows and Linux keep v2's), the
+exported one serves the rest (macOS). Both must give the fixtures' vectors
+to cosine 0.99999, since they share the modelId.
+
 Also written to the output dir:
 
     tokenizer.model   the Gemma SentencePiece model, copied from the checkpoint
@@ -74,7 +80,8 @@ import torch.nn.functional as F
 HF_MODEL = "google/siglip2-base-patch16-256"
 MODEL_ID = "siglip2-base-patch16-256"
 RELEASE_TAG = "models-siglip2-base-v3"
-MANIFEST_VERSION = 3
+MANIFEST_VERSION = 4
+PLATFORMS = ("windows", "macos", "linux")
 # Public, model-only repository: buyers download with no token (owner, 2026-10-16).
 REPO = "arbaaz360/siglip2-base-onnx"
 OPSET = 17
@@ -517,6 +524,12 @@ def main() -> int:
     ap.add_argument("--text-from", type=Path, default=None,
                     help="publish this text.onnx instead of the one exported here (verified the same "
                          "way); keeps a released text tower byte for byte")
+    ap.add_argument("--vision-from", type=Path, default=None,
+                    help="a released vision.onnx to list for --vision-from-platforms instead of the "
+                         "exported one; the exported one is listed for the other platforms")
+    ap.add_argument("--vision-from-release", default=None, help="the release tag --vision-from was published in")
+    ap.add_argument("--vision-from-platforms", default="windows,linux",
+                    help=f"comma-separated, of {', '.join(PLATFORMS)}")
     ap.add_argument("--model-id", default=None,
                     help="the manifest's modelId; by default the shipped one when the image vectors "
                          f"agree with its fixtures to cosine >= {SAME_SPACE_COSINE}, else the export fails")
@@ -815,20 +828,55 @@ def main() -> int:
         # the core rebuild every stored index instead of mixing two spaces.
         model_id = MODEL_ID + ("-q8" if args.vision_matmul != "fp16" else "")
 
+    # ---- a released vision tower for some platforms ---------------------------
+    from_platforms: list[str] = []
+    if args.vision_from:
+        if not args.vision_from_release:
+            raise SystemExit("--vision-from needs --vision-from-release")
+        from_platforms = [x.strip() for x in args.vision_from_platforms.split(",") if x.strip()]
+        if not from_platforms or any(x not in PLATFORMS for x in from_platforms) or set(from_platforms) == set(PLATFORMS):
+            raise SystemExit(f"--vision-from-platforms must name some, not all, of {PLATFORMS}")
+        so = ort_session(args.vision_from)
+        sin = so.get_inputs()[0]
+        if sin.name != vin.name or sin.shape != vin.shape:
+            raise SystemExit(f"{args.vision_from}: input {sin.name} {sin.shape}, the export's is {vin.name} {vin.shape}")
+        other = so.run(None, {sin.name: fpix.astype(np.float16 if "float16" in sin.type else np.float32)})[0]
+        pair = {f"{n}.png": float(cosine(a.astype(np.float32), b.astype(np.float32)))
+                for (n, _), a, b in zip(fixture_images, femb, other)}
+        verify["platform_vision"] = {"file": str(args.vision_from), "release": args.vision_from_release,
+                                     "platforms": from_platforms, "sha256": sha256_of(args.vision_from),
+                                     "image_cosines_vs_export": pair, "image_cosine_min": min(pair.values())}
+        (out / "verify.json").write_text(json.dumps(verify, indent=2))
+        log(f"vision for {','.join(from_platforms)}: {args.vision_from.name} from {args.vision_from_release}; "
+            f"fixtures against the exported vision: cosine min {min(pair.values()):.7f}")
+        if min(pair.values()) < SAME_SPACE_COSINE:
+            raise SystemExit("the two vision towers disagree; they cannot share a modelId")
+
     (fx / "expected.json").write_text(json.dumps(fixtures))
     log(f"fixtures: {len(fixture_images)} images, {len(fsent)} sentences -> {fx}")
 
     # ---- manifest ----------------------------------------------------------
     files = []
+    if args.vision_from:
+        files.append({
+            "name": "vision.onnx", "platforms": from_platforms,
+            "bytes": args.vision_from.stat().st_size, "sha256": sha256_of(args.vision_from),
+            "url": f"https://github.com/{REPO}/releases/download/{args.vision_from_release}/vision.onnx",
+        })
     for name in ("vision.onnx", "text.onnx", "tokenizer.model"):
         p = out / name
-        files.append({
-            "name": name, "bytes": p.stat().st_size, "sha256": sha256_of(p),
+        entry = {"name": name}
+        if name == "vision.onnx" and from_platforms:
+            entry["platforms"] = [x for x in PLATFORMS if x not in from_platforms]
+        entry.update({
+            "bytes": p.stat().st_size, "sha256": sha256_of(p),
             "url": f"https://github.com/{REPO}/releases/download/{args.release}/{name}",
         })
+        files.append(entry)
     weights = "float16" if args.variant == "fp16" else "float16-weights-float32-compute"
     if args.vision_compute == "fp32":
-        weights += "; vision computes in float32"
+        weights += ("; vision computes in float32 on " + ", ".join(x for x in PLATFORMS if x not in from_platforms)
+                    + f" (float16 on {', '.join(from_platforms)})" if from_platforms else "; vision computes in float32")
     if args.text_table == "int8":
         weights += "; text token table int8, per-row scale"
     if args.vision_matmul == "int8":
@@ -853,10 +901,11 @@ def main() -> int:
         "files": files,
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    total = sum(f["bytes"] for f in files)
-    log(f"manifest written; download size {total / 1e6:.1f} MB")
+    for platform in PLATFORMS:
+        mine = [f for f in files if platform in f.get("platforms", PLATFORMS)]
+        log(f"manifest written; download on {platform}: {sum(f['bytes'] for f in mine) / 1e6:.1f} MB")
     for f in files:
-        log(f"  {f['name']:16} {f['bytes'] / 1e6:8.1f} MB  {f['sha256'][:16]}…")
+        log(f"  {f['name']:16} {f['bytes'] / 1e6:8.1f} MB  {f['sha256'][:16]}  {','.join(f.get('platforms', ['all']))}")
     return 0
 
 

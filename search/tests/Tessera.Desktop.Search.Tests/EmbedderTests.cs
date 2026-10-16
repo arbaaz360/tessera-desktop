@@ -37,6 +37,9 @@ public sealed class ModelFixture : IDisposable
             sw.Restart();
             Gpu = new SiglipEmbedder(gpuOptions, new ModelStore(gpuOptions), null, manifest);
             Gpu.LoadFromDirectory(TestPaths.ModelDir);
+            // On macOS the GPU embedder is ready on the CPU at once and moves to
+            // CoreML in the background; the tests want CoreML.
+            Gpu.DeviceUpgrade.Wait();
             GpuLoadMs = sw.Elapsed.TotalMilliseconds;
             if (Gpu.Device == EmbedDevice.Cpu)
             {
@@ -258,6 +261,53 @@ public class EmbedderTests : IClassFixture<ModelFixture>
             foreach (var b in bitmaps) b.Dispose();
         }
     }
+
+    /// <summary>
+    /// The macOS move from the CPU to CoreML, run on any machine with a second
+    /// set of CPU sessions: ready at once, embeds keep working while the
+    /// second set loads and is swapped in, and the vectors do not move.
+    /// </summary>
+    [Fact]
+    public async Task SwapsSessionsWhileEmbedsRun()
+    {
+        var m = Model();
+        if (m is null) return;
+        using var bmp = Swatch(200, 40, 40);
+        float[] image = m.EmbedImage(bmp);
+        float[] text = m.EmbedText("a solid red square");
+
+        var options = new SearchOptions { ModelsDir = Path.GetDirectoryName(TestPaths.ModelDir)!, PreferGpu = false };
+        using var e = new SiglipEmbedder(options, new ModelStore(options), null, ModelManifest.Embedded()) { UpgradeOnCpuForTests = true };
+        var sw = Stopwatch.StartNew();
+        e.LoadFromDirectory(TestPaths.ModelDir!);
+        double readyMs = sw.Elapsed.TotalMilliseconds;
+        Assert.True(e.IsReady);
+        Assert.Null(e.FixedImageBatch);
+
+        float worst = 1;
+        int calls = 0;
+        var workers = Enumerable.Range(0, 3).Select(w => Task.Run(() =>
+        {
+            int n = 0;
+            while (!e.DeviceUpgrade.IsCompleted || n < 2)
+            {
+                float c = w % 2 == 0 ? Cosine(e.EmbedImage(bmp), image) : Cosine(e.EmbedText("a solid red square"), text);
+                lock (WorkersLock) worst = Math.Min(worst, c);
+                n++;
+            }
+            Interlocked.Add(ref calls, n);
+        })).ToArray();
+        await e.DeviceUpgrade;
+        await Task.WhenAll(workers);
+
+        _out.WriteLine($"ready in {readyMs:F0} ms, swapped {e.DeviceUpgradeTime?.TotalMilliseconds:F0} ms later; {calls} calls across the swap, cosine min {worst:F6}");
+        Assert.Equal(SiglipEmbedder.CoreMlImageBatch, e.FixedImageBatch);
+        Assert.NotNull(e.DeviceUpgradeTime);
+        Assert.True(worst >= 0.99999f, $"vectors moved across the swap: {worst}");
+        Assert.True(Cosine(e.EmbedImage(bmp), image) >= 0.99999f);
+    }
+
+    private static readonly object WorkersLock = new();
 
     /// <summary>The manifest names the graphs' free batch dimension, which CoreML fixes by name.</summary>
     [Fact]

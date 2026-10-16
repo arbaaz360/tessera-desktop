@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Numerics.Tensors;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -15,9 +16,20 @@ namespace Tessera.Desktop.Search;
 /// <remarks>
 /// <para>
 /// Device choice at load: DirectML on Windows when <see cref="SearchOptions.PreferGpu"/>
-/// and a hardware adapter exists; CoreML on macOS when <see cref="SearchOptions.PreferGpu"/>;
-/// the CPU provider otherwise, and as the fallback when a GPU provider fails
-/// to initialise. The chosen one is in <see cref="Device"/>.
+/// and a hardware adapter exists; the CPU provider otherwise, and as the
+/// fallback when a GPU provider fails to initialise. The chosen one is in
+/// <see cref="Device"/>.
+/// </para>
+/// <para>
+/// On macOS with <see cref="SearchOptions.PreferGpu"/> the CPU sessions load
+/// first (seconds) and the embedder is ready on them; CoreML compiles and
+/// loads in the background (minutes) and is swapped in when it is ready:
+/// calls already running finish on the CPU sessions, later calls use CoreML,
+/// <see cref="Device"/> turns to <see cref="EmbedDevice.CoreML"/>, and the CPU
+/// sessions are disposed when the last call using them returns. If CoreML
+/// fails the embedder stays on the CPU. <see cref="DeviceUpgrade"/> completes
+/// when that background load is over. The two sides give the same vectors to
+/// cosine 0.9999 (search/README.md), so an index mixes them safely.
 /// </para>
 /// <para>
 /// Core ML compiles a model for fixed shapes only, so on CoreML the vision
@@ -35,10 +47,9 @@ public sealed class SiglipEmbedder : IImageEmbedder, IDisposable
 
     /// <summary>
     /// CoreML provider options, chosen on the macOS runner (search/README.md):
-    /// ML Program, because the graphs are float16 and ONNX Runtime's
+    /// ML Program, because the graphs store float16 and ONNX Runtime's
     /// NeuralNetwork builder takes float32 only; CPU and GPU, because the
-    /// Neural Engine could not be measured (GitHub's Mac runners are virtual
-    /// machines without one).
+    /// vision tower computes in float32, which the Neural Engine does not run.
     /// </summary>
     internal const string CoreMlFormat = "MLProgram";
     internal const string CoreMlComputeUnits = "CPUAndGPU";
@@ -50,24 +61,17 @@ public sealed class SiglipEmbedder : IImageEmbedder, IDisposable
     private readonly object _loadGate = new();
 
     private Task? _loading;
-    private InferenceSession? _vision;
-    private InferenceSession? _text;
     private GemmaTextTokenizer? _tokenizer;
-    private string _visionInput = "pixel_values";
-    private string _textInput = "input_ids";
-    private string _visionOutput = "image_embeds";
-    private string _textOutput = "text_embeds";
-    private bool _visionWantsHalf;
-    private int _visionBatch;   // 0: any batch; otherwise the only batch the session takes
-    private int _textBatch;
-    private volatile bool _ready;
+    private volatile Sessions? _active;     // what embeds use now; null before load and after Dispose
+    private Task _upgrade = Task.CompletedTask;
+    private bool _disposed;
 
     public SiglipEmbedder(SearchOptions options, ModelStore store, ILogger<SiglipEmbedder>? log = null, ModelManifest? manifest = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _log = log ?? NullLogger<SiglipEmbedder>.Instance;
-        _manifest = manifest ?? ModelManifest.Embedded();
+        _manifest = (manifest ?? ModelManifest.Embedded()).ForPlatform();
         if (!string.Equals(_manifest.ModelId, options.ModelId, StringComparison.Ordinal))
             throw new ArgumentException(
                 $"This build ships only '{_manifest.ModelId}'; SearchOptions.ModelId is '{options.ModelId}'.", nameof(options));
@@ -77,20 +81,30 @@ public sealed class SiglipEmbedder : IImageEmbedder, IDisposable
     public int Dimensions => _manifest.Dimensions;
     public int ImageSize => _manifest.ImageSize;
     public int TextLength => _manifest.Tokenizer.MaxLength;
-    public bool IsReady => _ready;
-    public EmbedDevice? Device { get; private set; }
+    public bool IsReady => _active is not null;
+    public EmbedDevice? Device => _active?.Device;
 
     /// <summary>The GPU adapter DirectML was asked for, when one was.</summary>
-    public string? DeviceName { get; private set; }
+    public string? DeviceName => _active?.DeviceName;
 
-    /// <summary>The manifest this embedder loads from.</summary>
+    /// <summary>The manifest this embedder loads from, narrowed to this platform.</summary>
     public ModelManifest Manifest => _manifest;
 
     /// <summary>The model directory once loaded.</summary>
     public string? ModelDirectory { get; private set; }
 
     /// <summary>The batch the vision session was fixed to, or null when it takes any.</summary>
-    public int? FixedImageBatch => _visionBatch > 0 ? _visionBatch : null;
+    public int? FixedImageBatch => _active is { VisionBatch: > 0 } s ? s.VisionBatch : null;
+
+    /// <summary>
+    /// Completes when the background move to CoreML is over, whether it moved
+    /// or stayed on the CPU; never faults. Already complete where there is no
+    /// such move (Windows, Linux, <see cref="SearchOptions.PreferGpu"/> false).
+    /// </summary>
+    public Task DeviceUpgrade => _upgrade;
+
+    /// <summary>From ready on the CPU to CoreML in use, once that has happened.</summary>
+    public TimeSpan? DeviceUpgradeTime { get; private set; }
 
     /// <summary>
     /// Fixes the batch dimensions on the CPU provider too, as CoreML needs
@@ -98,9 +112,15 @@ public sealed class SiglipEmbedder : IImageEmbedder, IDisposable
     /// </summary>
     internal bool FixedShapesOnCpu { get; init; }
 
+    /// <summary>
+    /// Runs the background move with a second set of CPU sessions (batches
+    /// fixed) instead of CoreML, so the swap can be tested on any machine.
+    /// </summary>
+    internal bool UpgradeOnCpuForTests { get; init; }
+
     public Task EnsureReadyAsync(IProgress<ModelDownloadProgress>? progress, CancellationToken ct)
     {
-        if (_ready) return Task.CompletedTask;
+        if (IsReady) return Task.CompletedTask;
         Task loading;
         lock (_loadGate)
         {
@@ -135,7 +155,7 @@ public sealed class SiglipEmbedder : IImageEmbedder, IDisposable
     /// </param>
     private void LoadSessions(string dir, bool verified)
     {
-        if (_ready) return;
+        if (IsReady) return;
         string visionPath = Path.Combine(dir, "vision.onnx");
         string textPath = Path.Combine(dir, "text.onnx");
         string tokenizerPath = Path.Combine(dir, "tokenizer.model");
@@ -143,95 +163,165 @@ public sealed class SiglipEmbedder : IImageEmbedder, IDisposable
             if (!File.Exists(p)) throw new FileNotFoundException("Model file missing.", p);
 
         var tokenizer = GemmaTextTokenizer.FromFile(tokenizerPath, _manifest.Tokenizer);
+        bool upgrade = UpgradeOnCpuForTests || (_options.PreferGpu && OperatingSystem.IsMacOS());
+        Sessions s = Checked(upgrade ? CreateCpu(visionPath, textPath, FixedShapesOnCpu) : CreateSessions(visionPath, textPath));
 
-        Sessions s = CreateSessions(dir, visionPath, textPath, verified);
+        lock (_loadGate)
+        {
+            if (_disposed)
+            {
+                s.Release();
+                throw new ObjectDisposedException(nameof(SiglipEmbedder));
+            }
+            _tokenizer = tokenizer;
+            ModelDirectory = dir;
+            _active = s;
+            _log.LogInformation("SigLIP2 {Model} loaded on {Device}{Name}{Batch}{Next}", ModelId, s.Device,
+                s.DeviceName is null ? "" : $" ({s.DeviceName})",
+                s.VisionBatch > 0 ? $", batches fixed at {s.VisionBatch} images and {s.TextBatch} sentence" : "",
+                upgrade ? "; CoreML loads in the background" : "");
+            if (upgrade)
+            {
+                var ready = Stopwatch.StartNew();
+                _upgrade = Task.Run(() => Upgrade(dir, visionPath, textPath, verified, ready));
+            }
+        }
+    }
+
+    /// <summary>The background half of a macOS load: CoreML, then the swap. Never throws.</summary>
+    private void Upgrade(string dir, string visionPath, string textPath, bool verified, Stopwatch sinceReady)
+    {
+        Sessions next;
+        try
+        {
+            next = Checked(UpgradeOnCpuForTests ? CreateCpu(visionPath, textPath, fixedShapes: true) : CreateCoreMl(dir, visionPath, textPath, verified));
+        }
+#pragma warning disable CA1031 // a background load that fails for any reason leaves the CPU in use, and says why
+        catch (Exception e)
+#pragma warning restore CA1031
+        {
+            _log.LogWarning(e, "CoreML failed to initialise; staying on the CPU provider");
+            return;
+        }
+
+        Sessions? old;
+        lock (_loadGate)
+        {
+            if (_disposed)
+            {
+                next.Release();
+                return;
+            }
+            old = _active;
+            _active = next;
+            DeviceUpgradeTime = sinceReady.Elapsed;
+        }
+        old?.Release();   // disposed when the calls still using it return
+        _log.LogInformation("SigLIP2 {Model} moved to {Device} {Seconds:F1} s after it was ready on the CPU",
+            ModelId, next.Device, sinceReady.Elapsed.TotalSeconds);
+    }
+
+    /// <summary>Reads the sessions' input and output names and checks them; disposes the set and throws when they are wrong.</summary>
+    private Sessions Checked(Sessions s)
+    {
         try
         {
             NodeMetadata vin = s.Vision.InputMetadata.Values.First();
             NodeMetadata tin = s.Text.InputMetadata.Values.First();
-            _visionInput = s.Vision.InputMetadata.Keys.First();
-            _textInput = s.Text.InputMetadata.Keys.First();
-            _visionOutput = s.Vision.OutputMetadata.Keys.First();
-            _textOutput = s.Text.OutputMetadata.Keys.First();
-            _visionWantsHalf = vin.ElementType == typeof(Half) || vin.ElementType == typeof(Float16);
+            s.VisionInput = s.Vision.InputMetadata.Keys.First();
+            s.TextInput = s.Text.InputMetadata.Keys.First();
+            s.VisionOutput = s.Vision.OutputMetadata.Keys.First();
+            s.TextOutput = s.Text.OutputMetadata.Keys.First();
+            s.VisionWantsHalf = vin.ElementType == typeof(Half) || vin.ElementType == typeof(Float16);
             if (tin.ElementType != typeof(long))
                 throw new InvalidDataException($"text.onnx input is {tin.ElementType.Name}, expected int64.");
             int outDims = (int)s.Vision.OutputMetadata.Values.First().Dimensions.Last();
             if (outDims > 0 && outDims != Dimensions)
                 throw new InvalidDataException($"vision.onnx yields {outDims} dimensions, manifest says {Dimensions}.");
+            return s;
         }
         catch
         {
-            s.Vision.Dispose();
-            s.Text.Dispose();
+            s.Release();
             throw;
         }
-
-        _vision = s.Vision;
-        _text = s.Text;
-        _visionBatch = s.VisionBatch;
-        _textBatch = s.TextBatch;
-        _tokenizer = tokenizer;
-        Device = s.Device;
-        DeviceName = s.DeviceName;
-        ModelDirectory = dir;
-        _ready = true;
-        _log.LogInformation("SigLIP2 {Model} loaded on {Device}{Name}{Batch}", ModelId, s.Device,
-            s.DeviceName is null ? "" : $" ({s.DeviceName})",
-            s.VisionBatch > 0 ? $", batches fixed at {s.VisionBatch} images and {s.TextBatch} sentence" : "");
     }
 
-    /// <summary>Both sessions and how they were opened. A batch of 0 takes any batch.</summary>
-    private sealed record Sessions(InferenceSession Vision, InferenceSession Text, EmbedDevice Device, string? DeviceName, int VisionBatch, int TextBatch);
-
-    private Sessions CreateSessions(string dir, string visionPath, string textPath, bool verified)
+    /// <summary>
+    /// Both sessions and how they were opened (a batch of 0 takes any batch),
+    /// counted: the embedder holds one reference while the set is active and
+    /// every embed call one more, so a set swapped out is disposed when its
+    /// last call returns.
+    /// </summary>
+    private sealed class Sessions(InferenceSession vision, InferenceSession text, EmbedDevice device, string? deviceName, int visionBatch, int textBatch)
     {
-        if (_options.PreferGpu)
+        private int _uses = 1;
+
+        public InferenceSession Vision { get; } = vision;
+        public InferenceSession Text { get; } = text;
+        public EmbedDevice Device { get; } = device;
+        public string? DeviceName { get; } = deviceName;
+        public int VisionBatch { get; } = visionBatch;
+        public int TextBatch { get; } = textBatch;
+        public string VisionInput { get; set; } = "pixel_values";
+        public string VisionOutput { get; set; } = "image_embeds";
+        public string TextInput { get; set; } = "input_ids";
+        public string TextOutput { get; set; } = "text_embeds";
+        public bool VisionWantsHalf { get; set; }
+
+        /// <summary>False once the set has been released by everyone.</summary>
+        public bool TryAcquire()
         {
-            if (OperatingSystem.IsWindows())
+            int n;
+            do
             {
-                DirectMLDevices.Adapter? adapter = DirectMLDevices.BestHardwareAdapter();
-                if (adapter is not null)
-                {
-                    try
-                    {
-                        using SessionOptions so = BaseOptions();
-                        // DirectML needs the whole graph on one device and no
-                        // parallel executor.
-                        so.ExecutionMode = ExecutionMode.ORT_SEQUENTIAL;
-                        so.EnableMemoryPattern = false;
-                        so.AppendExecutionProvider_DML(adapter.Index);
-                        var vision = new InferenceSession(visionPath, so);
-                        try
-                        {
-                            var text = new InferenceSession(textPath, so);
-                            return new Sessions(vision, text, EmbedDevice.DirectML, adapter.Name, 0, 0);
-                        }
-                        catch
-                        {
-                            vision.Dispose();
-                            throw;
-                        }
-                    }
-                    catch (Exception e) when (e is OnnxRuntimeException or DllNotFoundException or EntryPointNotFoundException)
-                    {
-                        _log.LogWarning(e, "DirectML on {Adapter} failed to initialise; using the CPU provider", adapter.Name);
-                    }
-                }
-                else
-                {
-                    _log.LogInformation("No hardware GPU adapter; using the CPU provider");
-                }
+                n = Volatile.Read(ref _uses);
+                if (n == 0) return false;
             }
-            else if (OperatingSystem.IsMacOS())
+            while (Interlocked.CompareExchange(ref _uses, n + 1, n) != n);
+            return true;
+        }
+
+        public void Release()
+        {
+            if (Interlocked.Decrement(ref _uses) != 0) return;
+            Vision.Dispose();
+            Text.Dispose();
+        }
+    }
+
+    /// <summary>The active set, counted for the caller, who must <see cref="Sessions.Release"/> it.</summary>
+    private Sessions Acquire()
+    {
+        while (true)
+        {
+            Sessions s = _active ?? throw NotReady();
+            if (s.TryAcquire()) return s;
+            // Swapped out and released between the read and the count: read again.
+        }
+    }
+
+    /// <summary>DirectML on Windows when asked for and present, else the CPU.</summary>
+    private Sessions CreateSessions(string visionPath, string textPath)
+    {
+        if (_options.PreferGpu && OperatingSystem.IsWindows())
+        {
+            DirectMLDevices.Adapter? adapter = DirectMLDevices.BestHardwareAdapter();
+            if (adapter is not null)
             {
                 try
                 {
-                    var vision = CoreMlSession(dir, "vision", visionPath, _manifest.Inputs.Vision.BatchDimension, CoreMlImageBatch, verified);
+                    using SessionOptions so = BaseOptions();
+                    // DirectML needs the whole graph on one device and no
+                    // parallel executor.
+                    so.ExecutionMode = ExecutionMode.ORT_SEQUENTIAL;
+                    so.EnableMemoryPattern = false;
+                    so.AppendExecutionProvider_DML(adapter.Index);
+                    var vision = new InferenceSession(visionPath, so);
                     try
                     {
-                        var text = CoreMlSession(dir, "text", textPath, _manifest.Inputs.Text.BatchDimension, 1, verified);
-                        return new Sessions(vision, text, EmbedDevice.CoreML, null, CoreMlImageBatch, 1);
+                        var text = new InferenceSession(textPath, so);
+                        return new Sessions(vision, text, EmbedDevice.DirectML, adapter.Name, 0, 0);
                     }
                     catch
                     {
@@ -239,18 +329,27 @@ public sealed class SiglipEmbedder : IImageEmbedder, IDisposable
                         throw;
                     }
                 }
-                catch (Exception e) when (e is OnnxRuntimeException or DllNotFoundException or EntryPointNotFoundException or InvalidDataException)
+                catch (Exception e) when (e is OnnxRuntimeException or DllNotFoundException or EntryPointNotFoundException)
                 {
-                    _log.LogWarning(e, "CoreML failed to initialise; using the CPU provider");
+                    _log.LogWarning(e, "DirectML on {Adapter} failed to initialise; using the CPU provider", adapter.Name);
                 }
+            }
+            else
+            {
+                _log.LogInformation("No hardware GPU adapter; using the CPU provider");
             }
         }
 
-        int visionBatch = FixedShapesOnCpu ? CoreMlImageBatch : 0;
-        int textBatch = FixedShapesOnCpu ? 1 : 0;
+        return CreateCpu(visionPath, textPath, FixedShapesOnCpu);
+    }
+
+    private Sessions CreateCpu(string visionPath, string textPath, bool fixedShapes)
+    {
+        int visionBatch = fixedShapes ? CoreMlImageBatch : 0;
+        int textBatch = fixedShapes ? 1 : 0;
         using SessionOptions cpuVision = BaseOptions();
         using SessionOptions cpuText = BaseOptions();
-        if (FixedShapesOnCpu)
+        if (fixedShapes)
         {
             cpuVision.AddFreeDimensionOverrideByName(_manifest.Inputs.Vision.BatchDimension, visionBatch);
             cpuText.AddFreeDimensionOverrideByName(_manifest.Inputs.Text.BatchDimension, textBatch);
@@ -264,6 +363,21 @@ public sealed class SiglipEmbedder : IImageEmbedder, IDisposable
         catch
         {
             v.Dispose();
+            throw;
+        }
+    }
+
+    private Sessions CreateCoreMl(string dir, string visionPath, string textPath, bool verified)
+    {
+        var vision = CoreMlSession(dir, "vision", visionPath, _manifest.Inputs.Vision.BatchDimension, CoreMlImageBatch, verified);
+        try
+        {
+            var text = CoreMlSession(dir, "text", textPath, _manifest.Inputs.Text.BatchDimension, 1, verified);
+            return new Sessions(vision, text, EmbedDevice.CoreML, null, CoreMlImageBatch, 1);
+        }
+        catch
+        {
+            vision.Dispose();
             throw;
         }
     }
@@ -382,26 +496,33 @@ public sealed class SiglipEmbedder : IImageEmbedder, IDisposable
     public float[][] EmbedImages(IReadOnlyList<SKBitmap> bitmaps)
     {
         ArgumentNullException.ThrowIfNull(bitmaps);
-        InferenceSession session = Ready(_vision);
         int n = bitmaps.Count;
-        if (n == 0) return Array.Empty<float[]>();
-        int size = ImageSize;
-        int per = ImagePreprocessor.InputLength(size);
-        int batch = _visionBatch > 0 ? _visionBatch : n;
-        var result = new float[n][];
-        var pixels = new float[batch * per];
-        long[] shape = { batch, 3, size, size };
-        for (int start = 0; start < n; start += batch)
+        Sessions s = Acquire();
+        try
         {
-            int count = Math.Min(batch, n - start);
-            for (int i = 0; i < count; i++) ImagePreprocessor.Fill(bitmaps[start + i], size, pixels.AsSpan(i * per, per));
-            pixels.AsSpan(count * per).Clear();
-            using OrtValue input = _visionWantsHalf
-                ? OrtValue.CreateTensorValueFromMemory(ToHalf(pixels), shape)
-                : OrtValue.CreateTensorValueFromMemory(pixels, shape);
-            Run(session, _visionInput, input, _visionOutput, count).CopyTo(result, start);
+            if (n == 0) return Array.Empty<float[]>();
+            int size = ImageSize;
+            int per = ImagePreprocessor.InputLength(size);
+            int batch = s.VisionBatch > 0 ? s.VisionBatch : n;
+            var result = new float[n][];
+            var pixels = new float[batch * per];
+            long[] shape = { batch, 3, size, size };
+            for (int start = 0; start < n; start += batch)
+            {
+                int count = Math.Min(batch, n - start);
+                for (int i = 0; i < count; i++) ImagePreprocessor.Fill(bitmaps[start + i], size, pixels.AsSpan(i * per, per));
+                pixels.AsSpan(count * per).Clear();
+                using OrtValue input = s.VisionWantsHalf
+                    ? OrtValue.CreateTensorValueFromMemory(ToHalf(pixels), shape)
+                    : OrtValue.CreateTensorValueFromMemory(pixels, shape);
+                Run(s.Vision, s.VisionInput, input, s.VisionOutput, count).CopyTo(result, start);
+            }
+            return result;
         }
-        return result;
+        finally
+        {
+            s.Release();
+        }
     }
 
     public float[] EmbedText(string text)
@@ -415,28 +536,35 @@ public sealed class SiglipEmbedder : IImageEmbedder, IDisposable
     public float[][] EmbedTexts(IReadOnlyList<string> texts)
     {
         ArgumentNullException.ThrowIfNull(texts);
-        InferenceSession session = Ready(_text);
-        GemmaTextTokenizer tokenizer = _tokenizer!;
         int n = texts.Count;
-        if (n == 0) return Array.Empty<float[]>();
-        for (int i = 0; i < n; i++)
+        Sessions s = Acquire();
+        try
         {
-            if (string.IsNullOrWhiteSpace(texts[i]))
-                throw new ArgumentException($"Text {i} to embed must not be empty.", nameof(texts));
+            GemmaTextTokenizer tokenizer = _tokenizer!;
+            if (n == 0) return Array.Empty<float[]>();
+            for (int i = 0; i < n; i++)
+            {
+                if (string.IsNullOrWhiteSpace(texts[i]))
+                    throw new ArgumentException($"Text {i} to embed must not be empty.", nameof(texts));
+            }
+            int len = tokenizer.MaxLength;
+            int batch = s.TextBatch > 0 ? s.TextBatch : n;
+            var result = new float[n][];
+            var ids = new long[batch * len];
+            for (int start = 0; start < n; start += batch)
+            {
+                int count = Math.Min(batch, n - start);
+                for (int i = 0; i < count; i++) tokenizer.Encode(texts[start + i], ids.AsSpan(i * len, len));
+                ids.AsSpan(count * len).Clear();
+                using OrtValue input = OrtValue.CreateTensorValueFromMemory(ids, new long[] { batch, len });
+                Run(s.Text, s.TextInput, input, s.TextOutput, count).CopyTo(result, start);
+            }
+            return result;
         }
-        int len = tokenizer.MaxLength;
-        int batch = _textBatch > 0 ? _textBatch : n;
-        var result = new float[n][];
-        var ids = new long[batch * len];
-        for (int start = 0; start < n; start += batch)
+        finally
         {
-            int count = Math.Min(batch, n - start);
-            for (int i = 0; i < count; i++) tokenizer.Encode(texts[start + i], ids.AsSpan(i * len, len));
-            ids.AsSpan(count * len).Clear();
-            using OrtValue input = OrtValue.CreateTensorValueFromMemory(ids, new long[] { batch, len });
-            Run(session, _textInput, input, _textOutput, count).CopyTo(result, start);
+            s.Release();
         }
-        return result;
     }
 
     /// <summary>Token ids for a sentence, as the text tower sees them. For tests and diagnostics.</summary>
@@ -490,18 +618,23 @@ public sealed class SiglipEmbedder : IImageEmbedder, IDisposable
         return h;
     }
 
-    private InferenceSession Ready(InferenceSession? session)
-        => _ready && session is not null ? session : throw NotReady();
-
     private static InvalidOperationException NotReady()
         => new("The model is not loaded. Await EnsureReadyAsync first.");
 
+    /// <summary>
+    /// Releases the sessions; calls still running finish first. A CoreML load
+    /// still running in the background disposes what it made when it ends.
+    /// </summary>
     public void Dispose()
     {
-        _ready = false;
-        _vision?.Dispose();
-        _text?.Dispose();
-        _vision = null;
-        _text = null;
+        Sessions? s;
+        lock (_loadGate)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            s = _active;
+            _active = null;
+        }
+        s?.Release();
     }
 }
