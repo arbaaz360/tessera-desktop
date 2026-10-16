@@ -20,6 +20,38 @@ agreement between the parts is `docs/CONTRACT.md`.
 | `fixtures/` | coordinator | generator for a large synthetic library |
 | `docs/` | coordinator | plan, contract, decisions |
 
+## Status, 2026-10-16
+
+All four parts are merged on `main`. The Windows release build was run end to
+end on the owner's PC: installer build, launch, onboarding, folder added
+through the core, scan, thumbnails, SigLIP2 embeddings on DirectML, text
+search, "more like this", file-name search, duplicates, folder removal and a
+clean shutdown.
+
+| Measured (Windows, RTX 5060 Ti, NVMe) | Number |
+|---|---|
+| MSI / NSIS installer | 75 MB / 55 MB, without the model |
+| Model download | 755 MB, once, on first run |
+| 300 screenshots, folder added → searchable | 11.5 s, 0 errors |
+| Text search over 336 pictures | about 30 ms |
+| "More like this" | 4 ms |
+| Core shutdown on window close | exit 0 in 0.3 s, no orphan |
+
+Search quality: on photographs it ranks as a person would. Nine queries over
+the Windows wallpapers and colour swatches all put the right pictures first
+(lakes, pines, cherry blossom, fabric, each colour). On screenshots of
+application windows it is weak, as the search README already found; that is
+the model's domain, not a defect, and the buyers keep photographs and
+artwork.
+
+| Not done | Why |
+|---|---|
+| Model hosting for buyers | the release lives in this private repo, so its URLs are 404 without a token |
+| macOS | nothing has run on a Mac yet |
+| Signing, updater key, Gumroad product id | placeholders until the certificates and the product exist |
+| Duplicate copies counted as "moved" in a scan's numbers | small counting defect in the scanner; the duplicates view itself is right |
+| Smaller model download | the text tower's vocabulary is 565 MB; int8 on that table would save about 200 MB |
+
 ## Build
 
 ```bash
