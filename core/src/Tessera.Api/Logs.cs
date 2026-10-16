@@ -45,11 +45,11 @@ internal static partial class Logs
     public static partial void ScanKnown(this ILogger logger, long runId, int count);
 
     [LoggerMessage(Level = LogLevel.Information,
-        Message = "Scan {RunId} finished: seen {Seen}, added {Added}, moved {Moved}, " +
+        Message = "Scan {RunId} finished: seen {Seen}, added {Added}, moved {Moved}, copies {Copies}, " +
                   "unchanged {Unchanged}, gone {Gone}, errors {Errors}, cancelled {Cancelled}, " +
                   "{ElapsedMs} ms, {PerSecond:0.0} files/s")]
     public static partial void ScanFinished(
-        this ILogger logger, long runId, long seen, long added, long moved,
+        this ILogger logger, long runId, long seen, long added, long moved, long copies,
         long unchanged, long gone, long errors, bool cancelled, long elapsedMs, double perSecond);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Scan {RunId} cancelled")]
@@ -88,6 +88,15 @@ internal static partial class Logs
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Watch tick failed; continuing")]
     public static partial void WatchTickFailed(this ILogger logger, Exception ex);
+
+    // ----------------------------------------------------------- headers
+
+    [LoggerMessage(Level = LogLevel.Information,
+        Message = "Header backfill: read {Read}, better date for {Retimed}, unreadable {Unreadable}, {ElapsedMs} ms")]
+    public static partial void BackfillPass(this ILogger logger, long read, long retimed, long unreadable, long elapsedMs);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Header backfill pass failed; retrying")]
+    public static partial void BackfillFailed(this ILogger logger, Exception ex);
 
     // ----------------------------------------------------------- thumbnails
 

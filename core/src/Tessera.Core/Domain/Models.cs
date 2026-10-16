@@ -96,6 +96,7 @@ public sealed record ScanRun
     public long FilesSeen { get; init; }
     public long Added { get; init; }
     public long Moved { get; init; }
+    public long Copies { get; init; }
     public long Unchanged { get; init; }
     public long MarkedGone { get; init; }
     public long Errors { get; init; }

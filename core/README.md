@@ -10,10 +10,10 @@ measures.
 
 | Folder | What |
 |---|---|
-| `src/Tessera.Core` | Pure rules: hashing, path spelling, scan safety, the domain records |
-| `src/Tessera.Data` | SQLite: the schema (one embedded migration), Dapper repositories, the work queue |
-| `src/Tessera.Api` | Kestrel, the boot handshake, token auth, the routes, the workers, the fake search |
-| `tests/Tessera.Tests` | 93 tests: repositories on a temp database, the scanner over real PNGs, a 200,000-row timeline, the boot handshake against the real exe |
+| `src/Tessera.Core` | Pure rules: hashing, path spelling, scan safety, capture-date parsing, the domain records |
+| `src/Tessera.Data` | SQLite: the schema (embedded migrations), Dapper repositories, the work queue |
+| `src/Tessera.Api` | Kestrel, the boot handshake, token auth, the routes, the workers, the header reader, the fake search |
+| `tests/Tessera.Tests` | 174 tests: repositories on a temp database, the scanner over real PNGs and JPEGs, header bytes written by hand (EXIF, eXIf, XMP, MP4), a 200,000-row timeline, the boot handshake against the real exe |
 | `tessera-core.slnx` | So that `dotnet test core` works from the repo root |
 
 ## Build, test, publish
@@ -97,14 +97,27 @@ New (CONTRACT §4): `/api/library` and its `roots` add, remove and scan,
 `/api/search/status`, `/api/search/model/download`, `/api/search/settings`;
 `/api/settings`; `/api/licence`. Status answers carry counts: `thumbnails`
 and `embeddings` report `pending`, `done` and `failed`; a root reports its
-files, contents, trashed, and its last scan's seen/added/moved/gone/errors,
+files, contents, trashed, and its last scan's seen/added/moved/copies/gone/errors,
 refreshed every two seconds while it runs.
+
+Two additive fields in `GET /api/library`, beyond the contract:
+
+| Field | Meaning |
+|---|---|
+| `roots[].lastScan.copies` | known bytes found at a new path while another live copy is still on disk. `moved` is only real moves now: the old path is gone |
+| `dates` | `{"pending", "done", "exif", "filename", "mtime", "unreadable"}`: contents with a live location by where their date came from. `pending` (not read yet by the backfill) + `exif` + `filename` + `mtime` = all of them; `done` is the last three. `unreadable` is how many the latest backfill pass could not open (drive not mounted, file changed since the scan); they stay pending. Counted at most every 10 s |
 
 ## How it works, briefly
 
 | Piece | Rule |
 |---|---|
-| Identity | a file is its sha256; the path is an attribute on `location`. A move is one UPDATE, a copy is a second location, a deletion is `gone_at` |
+| Identity | a file is its sha256; the path is an attribute on `location`. A copy is a second location, a deletion is `gone_at`, a move is a new location with the old one retired at once |
+| Copy or move | known bytes at a new path are a **copy** while another live location of them is still on disk (same size), and a **move** when none is. A walk cannot tell from what it has seen, since the old path may not have been reached yet, so the scanner stats the other locations, inside the single writer so two threads meeting a pair cannot both be first. A move retires the old row then and there and carries its trash mark, so a rename is `moved 1, gone 0`, and a move seen by a scan of the destination folder alone is still a move. A root that is not mounted counts as still there (copy). Two identical files in a fresh folder are `added 1, copies 1` |
+| Capture dates | EXIF DateTimeOriginal, then DateTimeDigitized, then DateTime, each with its own offset tag (OffsetTimeOriginal …) and sub-seconds; then XMP (`exif:DateTimeOriginal`, `photoshop:DateCreated`, `xmp:CreateDate`), which is where PNG, WebP and edited files keep theirs; then the QuickTime/MP4 creation time (Apple's `creationdate` with its offset first, then `mvhd`, UTC). All of these are `taken_src = 'exif'`. Else a date in the file name (`filename`), else the modified time (`mtime`). A later sighting only replaces a date with a strictly better source. Refused, and the next source tried: before 1900, more than a day ahead, or not a calendar date |
+| File-name dates | `IMG_/VID_/PXL_20240101_123456[789]`, `20240101_123456`, `IMG20240101123456`, `2024-01-01 12.34.56` (and `_`, `-`), `Screenshot_20240101-123456`, `Screenshot_2024-01-01-12-34-56`, `Screenshot 2024-01-01 at 1.23.45 PM` (macOS, with its narrow space), `Screenshot 2024-01-01 123456` (Windows), `signal-…`, `photo_…` (Telegram), and the day alone from `IMG-20240101-WA0001` (WhatsApp) and `2019-07-04 …`, read as noon. The name only, never the folder. The first pattern that matches decides: an impossible date there (30 February, hour 25, 13 PM) gives no date rather than a looser match further down |
+| Headers only | MetadataExtractor walks JPEG segments to the start of scan, PNG and RIFF chunks, ISO-BMFF boxes, and **seeks** past what it does not want; a 16 MB `mdat` in front of a camera's `moov` is skipped, not read. A 4 MB read budget per file stops a malformed one. Width and height come from the same read, turned by EXIF orientation 5–8 (or HEIF `irot`, QuickTime track rotation), and so does a video's duration. A file that will not parse says nothing and falls back; it is never a scan error |
+| Header backfill | `content.meta_version` records which reader looked at a content (0 = none). The scanner reads headers when it first hashes a content; `HeaderBackfill` reads the rest (everything indexed before this) in content-id order, 200 per batch under the disk lock, one transaction per batch. Resumable without a cursor: what is left is a query on a partial index that is empty once it is done. The trigger on `content.taken_at` retimes `timeline_entry`; no code touches the timeline |
+| Thumbnails turned | the WebP is turned by the original's EXIF orientation (on the 320 px result, not the original), so the grid shows a phone's portrait shot upright, the same shape the headers recorded |
 | Timeline | `timeline_entry` is kept by triggers equal to "has a live, untrashed location"; paged by keyset `(taken_at, content_id)` on an index in that order |
 | Scans | reconciliation, not events: walk, hash what changed (size+mtime trusted), mark what was not seen. A walk that finds under half of what is known marks nothing gone. One scan at a time, queued per root or folder; the run row exists from the moment it is queued |
 | Watch | one stat per root per minute on the parent folder, a few hundred child stats round-robin; a folder that stops changing for a minute is queued for a scan. Nothing waits for a person |
@@ -115,6 +128,30 @@ refreshed every two seconds while it runs.
 | Free tier | while `free` and more than 2,000 distinct contents are indexed, the first 2,000 by id keep working and the rest get no thumbnail or vector; `PUT /api/licence {"state":"licensed"}` queues them |
 | Writes | one in-process writer (`Db.OpenWriteAsync`). Microsoft.Data.Sqlite waits for a busy database by sleeping 150 ms, so letting four threads contend cost a second per write; queued in-process, a rescan of 200 files went from 5 s to 23 ms |
 | Files | image files are opened through .NET streams, never Skia's `fopen`, which is ANSI and bound by MAX_PATH; a 259-character thumbnail path once failed every embedding |
+
+### A capture time with no offset
+
+Most cameras before about 2018, and many since, write DateTimeOriginal with
+no offset: a wall-clock reading in a zone nobody recorded. **The core reads
+it in the zone of the machine doing the scan, with that zone's rule for that
+date** (a July photo in London is BST, a January one GMT), and stores the UTC
+instant that results. File-name dates follow the same rule.
+
+Why: the library is one person's, on their own machine, and most of their
+pictures were taken where they live. Read there, these instants sort
+correctly against everything that is a true instant: photos with an offset,
+MP4 creation times (UTC), file times. And the web app, which shows instants
+in the viewer's zone, shows the clock face the camera recorded. Storing the
+digits as if they were UTC would show that clock face only to a viewer in
+UTC, and sort those pictures up to fourteen hours away from their
+neighbours.
+
+What it costs: a camera left on home time while travelling shows home time,
+as it does on the camera; and if the machine moves to another zone, these
+pictures shift by the difference in display, as every other instant does.
+An hour that happens twice is read as standard time; an hour that never
+happened gets the standard offset, landing just after the jump. A
+GPS-derived zone would do better for travel photos; it is not done.
 
 ## Numbers
 
@@ -137,6 +174,45 @@ embedder.
 | `library.db` for 1,000 contents | 828 KB |
 | Seeding 200,000 contents + timeline rows | 15 s |
 
+### Capture dates and copies: what they cost the scan (2026-10-16)
+
+The 537 files/s above was taken on a quiet machine on 2026-10-15. On
+2026-10-16 several other sessions were building, testing and downloading on
+it, and the **unchanged** build scanned the same 1,000 JPEGs anywhere from
+2.0 s to 34 s (30 to 489 files/s) while its own CPU stayed between 0.5 and
+1.3 s: it was waiting on a shared disk, not working. Against the old figure nothing
+could be judged that day. So before and after were run **alternately, in one
+process each, JIT warm, a fresh database per scan, search off**: the real
+`Scanner` built from the commit before this change and from this branch, 15
+scans each per fixture. The second fixture is the same 1,000 JPEGs with a
+camera-like EXIF block (Make, Model, the three dates, offset, sub-seconds,
+about 20 KB) in front.
+
+| 1,000 new JPEGs, 15 scans each | Before (median) | After (median) | Change |
+|---|---|---|---|
+| Plain (no EXIF): wall | 6.29 s, 159 files/s | 6.42 s, 156 files/s | +2 % |
+| Plain: the process's CPU | 0.81 s | 0.84 s | +4 % |
+| With EXIF: wall | 4.82 s, 207 files/s | 4.23 s, 237 files/s | within noise |
+| With EXIF: CPU | 0.73 s (fastest 0.58 s) | 1.03 s (fastest 0.67 s) | +0.09 s to +0.30 s per 1,000 |
+
+On wall time, the rate the task set a bound on, the scan stays within 20 %:
++2 % on plain JPEGs and no measurable change with EXIF. CPU rises 4 % on
+plain JPEGs and 0.1 to 0.3 ms per file with EXIF (parsing the IFDs), which
+does not reach the rate because the scan is not CPU-bound: about 1 s of CPU
+in a 4 to 6 s scan, the rest set by the disk and the single SQLite writer.
+What could not be done that day is re-measure the absolute 537 files/s. In
+isolation (one thread, warm cache, its own open):
+
+| What | Number |
+|---|---|
+| Header read of a 105 KB JPEG, no EXIF | 50 µs (hashing it: 95 µs) |
+| Same with the EXIF block | 59 µs (hashing it: 99 µs) |
+| Bytes the reader asks for, 2.5 MB noisy JPEG with EXIF | 321 |
+| Bytes it asks for, MP4 with 16 MB of media before its `moov` | 242 (the rest is seeked past) |
+| Opens per new file during a scan | 1: headers are parsed from the hash pass's first megabyte |
+| `dates` counts at 200,000 contents | 123 ms uncached, so reused up to 10 s while changing; an empty backfill batch 0.05 ms |
+| Published build, EXIF fixture, end to end | `dates`: exif 1,000, pending 0; `lastScan.copies` 0 |
+
 ## Not done
 
 - **The real model.** `FakeImageEmbedder` (sha256-derived vectors) and
@@ -150,8 +226,17 @@ embedder.
 - **HEIC, AVIF, TIFF, JXL, RAW on Windows.** Recorded as failed items with
   the reason. The macOS `sips` path is written but has not run on a Mac here,
   and neither has the `osx-arm64` publish.
-- **EXIF.** `taken_at` is the file's mtime (`taken_src = 'mtime'`); no
-  EXIF date yet. Dimensions are known once a thumbnail exists (ratio 1 before).
+- **Capture dates from real cameras.** The header tests use bytes written
+  by hand: EXIF with and without offsets, eXIf and XMP in PNG, an MP4 movie
+  header. No HEIC, WebP-with-EXIF, RAW, AVI or maker-note-heavy camera JPEG
+  has been through the reader here; MetadataExtractor handles them, and a
+  failure to parse falls back to the name and the file time rather than
+  erroring.
+- **Thumbnails made before the orientation fix** stay as they were (sideways
+  for a turned photo) until regenerated; their recorded shape matches them,
+  because the backfill only fills a missing width and height.
+- **The zone of a floating time is the machine's**, not the place the photo
+  was taken; GPS is not read.
 - **Battery detection** is Windows `GetSystemPowerStatus` and macOS `pmset`;
   the macOS half is untested.
 - The watch polls directory mtimes; there is no OS file-system watcher.

@@ -31,7 +31,9 @@ public sealed class SqliteRepositoryTests
     public async Task A_new_location_puts_the_picture_on_the_timeline_and_a_move_keeps_its_id()
     {
         using var lib = new TempLibrary();
-        var root = await lib.AddRootAsync();
+        var rootPath = Tessera.Core.PathRules.Canonical(Path.Combine(lib.Dir, "photos"));
+        Directory.CreateDirectory(rootPath);
+        var root = await lib.AddRootAsync(rootPath);
 
         var file = TempLibrary.File("a/one.png", takenAt: new DateTimeOffset(2021, 5, 6, 7, 8, 9, TimeSpan.Zero));
         var id = await lib.Content.UpsertAsync(file, None);
@@ -41,17 +43,23 @@ public sealed class SqliteRepositoryTests
         // Same path, same bytes: a heartbeat.
         Assert.Equal(Reconciled.Unchanged, await lib.Content.RecordLocationAsync(id, TempLibrary.Account, root, file, None));
 
-        // Same bytes at a new path: a move, the same content id, still one timeline row.
+        // Same bytes at a new path while the old file is still there: a copy.
+        var copy = file with { RelPath = "c/copy.png" };
+        Assert.Equal(id, await lib.Content.UpsertAsync(copy, None));
+        Assert.Equal(Reconciled.Copied, await lib.Content.RecordLocationAsync(id, TempLibrary.Account, root, copy, None));
+        await lib.Content.MarkGoneAsync(root, DateTimeOffset.UtcNow.AddSeconds(1), "c", [".png"], None);
+
+        // Same bytes at a new path, the old file absent: a move, the same
+        // content id, still one timeline row, and the old row retired then
+        // and there rather than left for the end-of-scan sweep.
         await Task.Delay(5);
         var scanStart = DateTimeOffset.UtcNow;
         await Task.Delay(5);
         var moved = file with { RelPath = "b/renamed.png" };
         Assert.Equal(id, await lib.Content.UpsertAsync(moved, None));
-        Assert.Equal(Reconciled.Moved, await lib.Content.RecordLocationAsync(id, TempLibrary.Account, root, moved, None));
+        Assert.Equal(Reconciled.Moved, await lib.Content.RecordLocationAsync(id, TempLibrary.Account, root, moved, _ => false, None));
         Assert.Equal(1, await lib.Timeline.CountAsync(TempLibrary.Account, None));
-
-        // The old path was not seen by this scan: gone. The picture stays.
-        Assert.Equal(1, await lib.Content.MarkGoneAsync(root, scanStart, null, [".png"], None));
+        Assert.Equal(0, await lib.Content.MarkGoneAsync(root, scanStart, null, [".png"], None));
         Assert.Equal(1, await lib.Timeline.CountAsync(TempLibrary.Account, None));
 
         var page = await lib.Timeline.PageAsync(TempLibrary.Account, null, null, 10, None);
@@ -60,7 +68,7 @@ public sealed class SqliteRepositoryTests
         Assert.Equal(new DateTimeOffset(2021, 5, 6, 7, 8, 9, TimeSpan.Zero), item.TakenAt);
 
         var view = await lib.Viewable.GetAsync(TempLibrary.Account, id, None);
-        Assert.Equal("C:/photos/b/renamed.png", view!.Value.AbsolutePath);
+        Assert.Equal($"{rootPath}/b/renamed.png", view!.Value.AbsolutePath);
     }
 
     [Fact]

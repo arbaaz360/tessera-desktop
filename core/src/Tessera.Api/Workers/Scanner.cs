@@ -2,6 +2,7 @@ using System.Threading.Channels;
 using Dapper;
 using Microsoft.Extensions.Options;
 using Tessera.Api.Licence;
+using Tessera.Api.Media;
 using Tessera.Core;
 using Tessera.Core.Domain;
 using Tessera.Data;
@@ -21,10 +22,17 @@ namespace Tessera.Api.Workers;
 /// replaces failed by quietly not noticing things.
 /// </para>
 /// <para>
-/// Every run writes a <c>scan_run</c> row with seen / added / moved / gone /
-/// errors, updated every two seconds while it runs, so the Library page shows
-/// a scan moving and "nothing happened" looks different from "everything
-/// worked".
+/// Every run writes a <c>scan_run</c> row with seen / added / moved / copies /
+/// gone / errors, updated every two seconds while it runs, so the Library
+/// page shows a scan moving and "nothing happened" looks different from
+/// "everything worked".
+/// </para>
+/// <para>
+/// A file that is hashed also has its headers read, from the few kilobytes
+/// at its front: the capture date (EXIF, XMP, QuickTime), else a date in its
+/// name, else its modified time; and its shape. New content is therefore on
+/// the timeline at the right day from the first scan, and the grid knows a
+/// picture is portrait before its thumbnail exists.
 /// </para>
 /// </remarks>
 public sealed class Scanner(
@@ -251,12 +259,12 @@ public sealed class Scanner(
         }
 
         var elapsed = DateTimeOffset.UtcNow - startedAt;
-        log.ScanFinished(runId.Value, outcome.Seen, outcome.Added, outcome.Moved,
+        log.ScanFinished(runId.Value, outcome.Seen, outcome.Added, outcome.Moved, outcome.Copies,
                          outcome.Unchanged, gone, outcome.Errors, cancelled,
                          (long)elapsed.TotalMilliseconds,
                          elapsed.TotalSeconds > 0 ? outcome.Seen / elapsed.TotalSeconds : 0);
 
-        return new ScanOutcome(runId.Value, outcome.Seen, outcome.Added, outcome.Moved,
+        return new ScanOutcome(runId.Value, outcome.Seen, outcome.Added, outcome.Moved, outcome.Copies,
                                outcome.Unchanged, gone, outcome.Errors, cancelled);
     }
 
@@ -282,20 +290,70 @@ public sealed class Scanner(
             return Reconciled.Unchanged;
         }
 
-        var sha = await Hashing.Sha256FileAsync(absPath, ct);
+        // The headers are read inside the hash pass, from the first megabyte
+        // it has already read: one open per file, and no read the hash would
+        // not make anyway, except a seek for a header that sits past it.
+        var now = DateTimeOffset.UtcNow;
+        var name = Path.GetFileName(absPath);
+        var headers = default(HeaderFacts);
+        var metaVersion = CaptureDates.ReaderVersion;
+        var sha = await Hashing.Sha256FileAsync(absPath, (head, open) =>
+        {
+            try
+            {
+                headers = MediaHeaders.Read(head, open, name, opts.LocalZone, now);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Left unread; the backfill tries again.
+                metaVersion = 0;
+            }
+        }, ct);
+
+        var captured = MediaHeaders.Resolve(headers, name, mtime, opts.LocalZone, now);
         var file = new ScannedFile(
             Sha256: sha,
             ByteSize: info.Length,
             Mime: MimeFor(absPath),
             RelPath: rel,
             FileMtime: mtime,
-            TakenAt: mtime,          // metadata extraction refines this later
-            TakenSrc: "mtime",
-            Width: null,
-            Height: null);
+            TakenAt: captured.TakenAt,
+            TakenSrc: captured.TakenSrc,
+            Width: captured.Width,
+            Height: captured.Height,
+            DurationMs: captured.DurationMs,
+            MetaVersion: metaVersion);
 
         var contentId = await content.UpsertAsync(file, ct);
-        return await content.RecordLocationAsync(contentId, root.AccountId, root.RootId, file, ct);
+        return await content.RecordLocationAsync(contentId, root.AccountId, root.RootId, file, o => StillThere(o, absPath), ct);
+    }
+
+    /// <summary>
+    /// Is another recorded location of these bytes still on disk? Decides a
+    /// copy (yes) from a move (no). Asked only for known bytes at a new path.
+    /// </summary>
+    /// <remarks>
+    /// A root that is not mounted cannot be judged and counts as still
+    /// there: its rows stay live until a scan of that root says otherwise, so
+    /// the new path is a copy. A path that differs from the new one only in
+    /// case is the same file on Windows and macOS, renamed: not there. A file
+    /// at the old path with a different size holds other bytes now: not there.
+    /// </remarks>
+    internal static bool StillThere(OtherLocation other, string newAbsPath)
+    {
+        if (!Directory.Exists(other.RootPath))
+        {
+            return true;
+        }
+
+        var abs = PathRules.Canonical($"{other.RootPath}/{other.RelPath}");
+        if (string.Equals(abs, newAbsPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var info = new FileInfo(abs);
+        return info.Exists && info.Length == other.ByteSize;
     }
 
     private static IEnumerable<string> EnumerateMedia(string root, string[] exclude)
@@ -359,7 +417,7 @@ public sealed class Scanner(
             $"""
             UPDATE scan_run
                SET finished_at = CASE WHEN @Finished THEN {Db.NowMs} END,
-                   files_seen = @Seen, added = @Added, moved = @Moved,
+                   files_seen = @Seen, added = @Added, moved = @Moved, copies = @Copies,
                    unchanged = @Same, marked_gone = @Gone, errors = @Errors,
                    error_sample = @Error, cancelled = @Cancelled
              WHERE run_id = @RunId
@@ -368,7 +426,8 @@ public sealed class Scanner(
             {
                 RunId = runId, Finished = finished,
                 Seen = Interlocked.Read(ref c.Seen), Added = Interlocked.Read(ref c.Added),
-                Moved = Interlocked.Read(ref c.Moved), Same = Interlocked.Read(ref c.Unchanged),
+                Moved = Interlocked.Read(ref c.Moved), Copies = Interlocked.Read(ref c.Copies),
+                Same = Interlocked.Read(ref c.Unchanged),
                 Gone = gone, Errors = Interlocked.Read(ref c.Errors),
                 Error = error, Cancelled = cancelled,
             },
@@ -380,6 +439,7 @@ public sealed class Scanner(
         public long Seen;
         public long Added;
         public long Moved;
+        public long Copies;
         public long Unchanged;
         public long Errors;
 
@@ -390,6 +450,7 @@ public sealed class Scanner(
             {
                 case Reconciled.Added: Interlocked.Increment(ref Added); break;
                 case Reconciled.Moved: Interlocked.Increment(ref Moved); break;
+                case Reconciled.Copied: Interlocked.Increment(ref Copies); break;
                 default: Interlocked.Increment(ref Unchanged); break;
             }
         }
@@ -397,5 +458,5 @@ public sealed class Scanner(
 }
 
 public sealed record ScanOutcome(
-    long RunId, long Seen, long Added, long Moved, long Unchanged,
+    long RunId, long Seen, long Added, long Moved, long Copies, long Unchanged,
     long MarkedGone, long Errors, bool Cancelled);

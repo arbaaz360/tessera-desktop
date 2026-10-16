@@ -29,4 +29,11 @@ public sealed class ScannerOptions
     /// is missed - rare enough to accept.
     /// </remarks>
     public bool TrustMtime { get; set; } = true;
+
+    /// <summary>
+    /// The zone a capture time with no offset was taken in: this machine's.
+    /// See <see cref="Tessera.Core.CaptureDates"/> for why. Settable so tests
+    /// do not depend on where they run.
+    /// </summary>
+    public TimeZoneInfo LocalZone { get; set; } = TimeZoneInfo.Local;
 }

@@ -56,10 +56,16 @@ internal sealed class TempLibrary : IDisposable
 
     public const long Account = Core.Domain.Account.BuiltInId;
 
-    public Scanner Scanner(int concurrency = 4) => new(
+    /// <param name="zone">Where a capture time with no offset is read; the machine's own when null.</param>
+    public Scanner Scanner(int concurrency = 4, TimeZoneInfo? zone = null) => new(
         Db, Content, Folders, Library, Exclusive, Tier,
-        Options.Create(new ScannerOptions { Concurrency = concurrency }),
+        Options.Create(new ScannerOptions { Concurrency = concurrency, LocalZone = zone ?? TimeZoneInfo.Local }),
         NullLogger<Scanner>.Instance);
+
+    public HeaderBackfill Backfill(TimeZoneInfo? zone = null) => new(
+        Content, Exclusive,
+        Options.Create(new ScannerOptions { LocalZone = zone ?? TimeZoneInfo.Local }),
+        NullLogger<HeaderBackfill>.Instance);
 
     /// <summary>A file the scanner could have seen: random bytes, so a random hash.</summary>
     public static ScannedFile File(string relPath, DateTimeOffset? takenAt = null, long size = 1234, string mime = "image/png") =>

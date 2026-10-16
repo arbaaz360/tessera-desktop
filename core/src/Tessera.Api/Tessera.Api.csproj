@@ -24,6 +24,10 @@
     <!-- Thumbnails and the model input. The base package carries the native
          libraries for Windows and macOS. -->
     <PackageReference Include="SkiaSharp" Version="3.119.0" />
+    <!-- Capture dates and dimensions from the file's headers (EXIF, XMP,
+         QuickTime). Apache-2.0, managed only, reads a stream and seeks past
+         pixel data rather than reading it. -->
+    <PackageReference Include="MetadataExtractor" Version="2.9.3" />
   </ItemGroup>
 
   <ItemGroup>

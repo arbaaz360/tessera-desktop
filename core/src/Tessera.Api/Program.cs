@@ -112,6 +112,8 @@ try
     builder.Services.AddHostedService(sp => sp.GetRequiredService<LibraryWatch>());
     builder.Services.AddSingleton<ThumbnailWorker>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<ThumbnailWorker>());
+    builder.Services.AddSingleton<HeaderBackfill>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<HeaderBackfill>());
     builder.Services.AddSingleton<EmbeddingWorker>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<EmbeddingWorker>());
 

@@ -255,7 +255,7 @@ public sealed class LibraryRepository(Db db)
 
     private const string RunColumns = """
         SELECT run_id AS RunId, root_id AS RootId, started_at AS StartedAt, finished_at AS FinishedAt,
-               files_seen AS FilesSeen, added AS Added, moved AS Moved, unchanged AS Unchanged,
+               files_seen AS FilesSeen, added AS Added, moved AS Moved, copies AS Copies, unchanged AS Unchanged,
                marked_gone AS MarkedGone, errors AS Errors, error_sample AS ErrorSample, cancelled AS Cancelled
           FROM scan_run
         """;
