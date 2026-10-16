@@ -220,15 +220,24 @@ Run [38872561745](https://github.com/arbaaz360/tessera-desktop/actions/runs/3887
 - The licence cache is not HMAC-protected (SRS 9.3 rule 5).
 - No deactivate command (SRS FR-47).
 - **CoreML does not load the model on macOS 26**, so a Mac embeds on the
-  CPU at about 1.5 images a second. Core ML refuses the vision model's
-  patch-embedding Conv: `Error compiling model: Failed to parse the model
-  specification. Error: Unable to parse ML Program: in operation
-  /vision_model/embeddings/patch_embedding/Conv: Required param 'pad' is
-  missing`. The Conv says `auto_pad=VALID` with no `pads`; ONNX Runtime's
-  CoreML builder turns that into `pad_type="valid"` with no `pad` input,
-  which this Core ML rejects. The fix belongs to `models/` (rewrite the Conv
-  to explicit `pads=[0,0,0,0]` in the export) or `search/` (a newer ONNX
-  Runtime); the CI probe tries both, see `tools/smoke/explicit_pads.py`.
+  CPU at about 1.5 images a second. Two causes, one behind the other, from
+  the CI probe ([run 38873830738](https://github.com/arbaaz360/tessera-desktop/actions/runs/38873830738)):
+
+  | Try | Core ML says |
+  |---|---|
+  | model as shipped (ONNX Runtime 1.24.4, and 1.31.0) | `Unable to parse ML Program: in operation /vision_model/embeddings/patch_embedding/Conv: Required param 'pad' is missing` |
+  | Conv padding spelled out (`tools/smoke/explicit_pads.py`) | `Failed to create MLModel … Input: pixel_values_fp16 has unbounded dimension which is not supported` |
+
+  The Conv says `auto_pad=VALID` with no `pads`; ONNX Runtime's CoreML
+  builder turns that into `pad_type="valid"` with no `pad` input, which this
+  Core ML rejects. Both models' batch dimension is the symbol `batch`, which
+  Core ML here will not take unbounded. Proposed fix, untested on a Mac:
+  `models/` writes `pads=[0,0,0,0]` instead of `auto_pad=VALID` in the export
+  (same output: identical vectors on Windows), and `search/` opens the
+  CoreML sessions with `SessionOptions.AddFreeDimensionOverrideByName("batch", n)`,
+  8 for vision (padding a short batch) and 1 for text. The smoke job's probe
+  now tests exactly that (`tools/smoke coreml`), but has not run: GitHub
+  stopped starting jobs on this account (billing, below).
 - `search/tests` `ModelStoreTests.EmbeddedManifestIsTheShippedOne` still
   expects the model URLs under `arbaaz360/tessera-desktop`; the manifest
   moved them to `arbaaz360/siglip2-base-onnx`. One string in `search/`.
@@ -240,5 +249,7 @@ Run [38872561745](https://github.com/arbaaz360/tessera-desktop/actions/runs/3887
   signed with the hardened runtime and `entitlements.plist` (JIT), so CI
   will have to `codesign` the core's files before `tauri build`.
 - The window is 1280 points wide and the runner's screen 1024, so the
-  launch screenshot shows it cut off on the left. Real Macs are wider; a
-  `maxWidth` from the screen size would be safer.
+  launch screenshot shows it cut off on the left. Real Macs are wider.
+- GitHub Actions stopped starting jobs on 2026-10-16 ("recent account
+  payments have failed or your spending limit needs to be increased"). A
+  macOS minute counts ten times against a private repository's allowance.
