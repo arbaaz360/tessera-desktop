@@ -1,144 +1,177 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Numerics.Tensors;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
+using SkiaSharp;
 using Tessera.Desktop.Search;
 
 namespace Tessera.Smoke;
 
 /// <summary>
-/// Raw ONNX Runtime sessions on CoreML with the <c>batch</c> dimension fixed
-/// (<see cref="SessionOptions.AddFreeDimensionOverrideByName"/>), each
-/// compared with a CPU session on the same input. The Core ML on macOS 26
-/// refuses unbounded dimensions; this shows whether a fixed batch is enough
-/// once the Conv padding is explicit. The search library does not do this
-/// yet; CI runs it to test the fix before proposing it.
+/// One tower in a raw ONNX Runtime session on CoreML, with the batch fixed
+/// and the CoreML options given on the command line, compared picture by
+/// picture (or sentence by sentence) with a CPU session on the same input.
+/// CI runs it over candidate graphs and compute units to choose what the
+/// search library ships; the library's own path is <c>tessera-smoke search</c>.
 /// </summary>
 internal static class CoreMlProbe
 {
-    private const string Sentence = "a solid red square";
+    private static readonly string[] Sentences = ["a solid red square", "a photo of a dog on a beach", "a city skyline at night"];
 
-    public static int Run(string modelDir, int batch)
+    /// <param name="loads">Sessions to open one after the other; with a cache directory the second shows a warm start.</param>
+    public static int Run(string onnx, int batch, string units, string format, string? cache, int loads, string? label)
     {
         var ort = OrtEnv.Instance().GetVersionString();
-        var report = new Report($"CoreML with batch fixed (ONNX Runtime {ort}, model from {modelDir})");
-        var manifest = ModelManifest.Embedded();
+        var name = label ?? Path.GetFileName(Path.GetDirectoryName(Path.GetFullPath(onnx)));
+        var report = new Report($"CoreML probe: {name}/{Path.GetFileName(onnx)}, {format}, {units}, batch {batch}"
+            + $"{(cache is null ? "" : ", cached")} (ONNX Runtime {ort})");
 
-        // The sentence's token ids, from the library's own tokenizer.
-        long[] ids;
-        var options = new SearchOptions { ModelsDir = Path.GetDirectoryName(modelDir)!, ModelId = manifest.ModelId, PreferGpu = false };
-        using (var store = new ModelStore(options))
-        using (var cpu = new SiglipEmbedder(options, store, null, manifest))
+        using var cpuOptions = new SessionOptions { GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL };
+        using var cpu = new InferenceSession(onnx, cpuOptions);
+        var inName = cpu.InputMetadata.Keys.First();
+        var outName = cpu.OutputMetadata.Keys.First();
+        var meta = cpu.InputMetadata[inName];
+        var text = meta.ElementType == typeof(long);
+        var dim = meta.SymbolicDimensions.FirstOrDefault(d => !string.IsNullOrEmpty(d)) ?? "batch";
+        if (text)
         {
-            cpu.LoadFromDirectory(modelDir);
-            ids = cpu.Tokenize(Sentence);
+            batch = 1;
         }
 
-        var length = manifest.Tokenizer.MaxLength;
-        Array.Resize(ref ids, length);
-        Probe(report, "vision", Path.Combine(modelDir, "vision.onnx"), batch, batch, () => Pixels(batch, manifest.ImageSize));
-        Probe(report, "text", Path.Combine(modelDir, "text.onnx"), 1, 1,
-            () => OrtValue.CreateTensorValueFromMemory(ids, [1, length]));
+        var (inputs, labels) = text ? TextInputs(onnx) : ImageInputs(batch);
+        var reference = inputs.Select(i => RunOnce(cpu, inName, outName, i)).ToArray();
+        var cpuMs = Time(cpu, inName, outName, inputs[0]);
+
+        for (var load = 1; load <= loads; load++)
+        {
+            using var so = new SessionOptions
+            {
+                GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
+                LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING,   // the partition count
+            };
+            so.AddFreeDimensionOverrideByName(dim, batch);
+            var providerOptions = new Dictionary<string, string> { ["ModelFormat"] = format, ["MLComputeUnits"] = units };
+            if (cache is not null)
+            {
+                Directory.CreateDirectory(cache);
+                providerOptions["ModelCacheDirectory"] = cache;
+            }
+
+            var sw = Stopwatch.StartNew();
+            InferenceSession coreml;
+            try
+            {
+                so.AppendExecutionProvider("CoreML", providerOptions);
+                coreml = new InferenceSession(onnx, so);
+            }
+            catch (Exception e) when (e is OnnxRuntimeException or NotSupportedException or EntryPointNotFoundException)
+            {
+                var message = e.Message.ReplaceLineEndings(" ");
+                report.Check(false, $"load {load}: CoreML session", message.Length > 600 ? message[..600] : message);
+                return report.Finish();
+            }
+
+            using (coreml)
+            {
+                report.Number($"load {load}: CoreML session", sw.Elapsed.TotalSeconds, "s");
+                float[][] got;
+                try
+                {
+                    got = inputs.Select(i => RunOnce(coreml, inName, outName, i)).ToArray();
+                }
+                catch (OnnxRuntimeException e)
+                {
+                    report.Check(false, $"load {load}: CoreML run", e.Message.ReplaceLineEndings(" "));
+                    return report.Finish();
+                }
+
+                var dims = reference[0].Length / batch;
+                var cosines = new List<double>();
+                for (var r = 0; r < inputs.Length; r++)
+                {
+                    for (var i = 0; i < batch; i++)
+                    {
+                        cosines.Add(TensorPrimitives.CosineSimilarity(got[r].AsSpan(i * dims, dims), reference[r].AsSpan(i * dims, dims)));
+                    }
+                }
+
+                if (load == 1)
+                {
+                    report.Number("CoreML against CPU, cosine per item",
+                        string.Join(", ", cosines.Select((c, i) => $"{labels[i]} {c.ToString("F5", CultureInfo.InvariantCulture)}")));
+                    var coremlMs = Time(coreml, inName, outName, inputs[0]);
+                    report.Number($"ms per run, CoreML / CPU (batch {batch})", $"{coremlMs:F1} / {cpuMs:F1}");
+                    if (!text)
+                    {
+                        report.Number("images per second, CoreML / CPU", $"{batch * 1000 / coremlMs:F1} / {batch * 1000 / cpuMs:F1}");
+                    }
+                }
+
+                report.Number($"load {load}: lowest cosine", cosines.Min(), "", 5);
+                report.Check(cosines.Min() >= 0.999, $"load {load}: CoreML matches the CPU (cosine >= 0.999)",
+                    cosines.Min().ToString("F5", CultureInfo.InvariantCulture));
+            }
+        }
+
+        if (cache is not null)
+        {
+            var files = Directory.GetFiles(cache, "*", SearchOption.AllDirectories);
+            report.Number("cache directory", $"{files.Length} files, {files.Sum(f => new FileInfo(f).Length) / 1048576.0:F0} MB");
+        }
+
         return report.Finish();
     }
 
-    /// <summary>Image 0 is a red swatch as SigLIP sees it (R +1, G and B -1); the rest are noise.</summary>
-    private static OrtValue Pixels(int batch, int size)
+    /// <summary>Red, green and blue swatches and generated pictures, through the library's own preprocessing.</summary>
+    private static (OrtValue[] Inputs, string[] Labels) ImageInputs(int batch)
     {
-        var plane = size * size;
-        var data = new float[batch * 3 * plane];
-        var random = new Random(7);
-        for (var i = 0; i < batch; i++)
+        var manifest = ModelManifest.Embedded();
+        var size = manifest.ImageSize;
+        var per = ImagePreprocessor.InputLength(size);
+        var bitmaps = new List<(string, SKBitmap)>
         {
-            for (var c = 0; c < 3; c++)
-            {
-                var span = data.AsSpan((i * 3 + c) * plane, plane);
-                if (i == 0)
-                {
-                    span.Fill(c == 0 ? 1f : -1f);
-                }
-                else
-                {
-                    for (var k = 0; k < plane; k++)
-                    {
-                        span[k] = (float)(random.NextDouble() * 2 - 1);
-                    }
-                }
-            }
-        }
-
-        return OrtValue.CreateTensorValueFromMemory(data, [batch, 3, size, size]);
-    }
-
-    private static void Probe(Report report, string name, string path, int batch, int itemsPerRun, Func<OrtValue> input)
-    {
-        using var cpuOptions = new SessionOptions { GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL };
-        using var cpu = new InferenceSession(path, cpuOptions);
-        var inName = cpu.InputMetadata.Keys.First();
-        var outName = cpu.OutputMetadata.Keys.First();
-        var reference = RunOnce(cpu, inName, outName, input);
-        var cpuMs = Time(cpu, inName, outName, input);
-
-        using var so = new SessionOptions
-        {
-            GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
-            LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING,   // prints the partition count when CoreML takes the graph in pieces
+            ("red", Images.Solid(new SKColor(255, 0, 0), 256, 256)),
+            ("green", Images.Solid(new SKColor(0, 255, 0), 256, 256)),
+            ("blue", Images.Solid(new SKColor(0, 0, 255), 256, 256)),
         };
-        so.AddFreeDimensionOverrideByName("batch", batch);
-
-        var sw = Stopwatch.StartNew();
-        InferenceSession coreml;
-        try
+        for (var k = 0; bitmaps.Count < 2 * batch; k++)
         {
-            so.AppendExecutionProvider("CoreML", new Dictionary<string, string>
-            {
-                ["ModelFormat"] = "MLProgram",
-                ["MLComputeUnits"] = "ALL",
-            });
-            coreml = new InferenceSession(path, so);
-        }
-        catch (Exception e) when (e is OnnxRuntimeException or NotSupportedException or EntryPointNotFoundException)
-        {
-            var message = e.Message.ReplaceLineEndings(" ");
-            report.Check(false, $"{name}: CoreML session with batch {batch}", message.Length > 600 ? message[..600] : message);
-            return;
+            bitmaps.Add(($"picture{k}", Images.Picture(200 + k, 640, 480)));
         }
 
-        using (coreml)
+        var runs = new List<OrtValue>();
+        for (var start = 0; start < bitmaps.Count; start += batch)
         {
-            report.Check(true, $"{name}: CoreML session with batch {batch}");
-            report.Number($"{name}: CoreML session load", sw.Elapsed.TotalSeconds, "s");
-            float[] got;
-            try
+            var pixels = new float[batch * per];
+            for (var i = 0; i < batch; i++)
             {
-                got = RunOnce(coreml, inName, outName, input);
-            }
-            catch (OnnxRuntimeException e)
-            {
-                report.Check(false, $"{name}: CoreML run", e.Message.ReplaceLineEndings(" "));
-                return;
+                ImagePreprocessor.Fill(bitmaps[start + i].Item2, size, pixels.AsSpan(i * per, per));
             }
 
-            var dims = got.Length / batch;
-            var lowest = Enumerable.Range(0, batch)
-                .Select(i => TensorPrimitives.CosineSimilarity(got.AsSpan(i * dims, dims), reference.AsSpan(i * dims, dims))).Min();
-            report.Number($"{name}: CoreML against CPU, lowest cosine", lowest, "", 5);
-            report.Check(lowest > 0.98, $"{name}: CoreML output matches the CPU", $"{lowest:F5}");
-
-            var coremlMs = Time(coreml, inName, outName, input);
-            report.Number($"{name}: ms per run, CoreML / CPU (batch {batch})", $"{coremlMs:F1} / {cpuMs:F1}");
-            if (itemsPerRun > 1)
-            {
-                report.Number($"{name}: items per second, CoreML / CPU", $"{itemsPerRun * 1000 / coremlMs:F1} / {itemsPerRun * 1000 / cpuMs:F1}");
-            }
+            runs.Add(OrtValue.CreateTensorValueFromMemory(pixels, [batch, 3, size, size]));
         }
+
+        foreach (var (_, b) in bitmaps)
+        {
+            b.Dispose();
+        }
+
+        return ([.. runs], [.. bitmaps.Select(b => b.Item1)]);
     }
 
-    private static float[] RunOnce(InferenceSession session, string inName, string outName, Func<OrtValue> input)
+    private static (OrtValue[] Inputs, string[] Labels) TextInputs(string onnx)
     {
-        using var value = input();
+        var manifest = ModelManifest.Embedded();
+        var tokenizer = GemmaTextTokenizer.FromFile(Path.Combine(Path.GetDirectoryName(onnx)!, "tokenizer.model"), manifest.Tokenizer);
+        var inputs = Sentences.Select(s => OrtValue.CreateTensorValueFromMemory(tokenizer.Encode(s), [1, tokenizer.MaxLength])).ToArray();
+        return (inputs, Sentences.Select(s => $"\"{s}\"").ToArray());
+    }
+
+    private static float[] RunOnce(InferenceSession session, string inName, string outName, OrtValue input)
+    {
         using var runOptions = new RunOptions();
-        using var outputs = session.Run(runOptions, [inName], [value], [outName]);
+        using var outputs = session.Run(runOptions, [inName], [input], [outName]);
         var output = outputs[0];
         if (output.GetTensorTypeAndShape().ElementDataType == TensorElementType.Float16)
         {
@@ -156,7 +189,7 @@ internal static class CoreMlProbe
     }
 
     /// <summary>Median of five runs after one warm-up, in milliseconds.</summary>
-    private static double Time(InferenceSession session, string inName, string outName, Func<OrtValue> input)
+    private static double Time(InferenceSession session, string inName, string outName, OrtValue input)
     {
         RunOnce(session, inName, outName, input);
         var times = new List<double>();

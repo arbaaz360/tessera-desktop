@@ -353,41 +353,6 @@ jobs:
           "$RUNNER_TEMP/smoke/tessera-smoke" core "$RUNNER_TEMP/core/tessera-core" \
             "$RUNNER_TEMP/library" "$RUNNER_TEMP/data" "${models[@]}" --timeout 600
 
-      # Not a gate. CoreML refuses the shipped model on this runner and the
-      # search step falls back to the CPU. Two causes found so far: the
-      # patch-embedding Conv's implicit padding ("Required param 'pad' is
-      # missing"), then the dynamic batch ("unbounded dimension which is not
-      # supported"); a newer ONNX Runtime alone changes neither. This tries
-      # raw sessions with the batch fixed, so the fix proposed for models/
-      # and search/ is one seen to work on a Mac:
-      #   1  model as shipped              ONNX Runtime as shipped
-      #   2  Conv padding spelled out      ONNX Runtime as shipped
-      #   3  Conv padding spelled out      newer ONNX Runtime
-      # Remove it once the search step gets CoreML.
-      - name: CoreML probe (candidate fixes)
-        if: ${{ !cancelled() && steps.model.outcome == 'success' }}
-        continue-on-error: true
-        env:
-          NEWER_ORT: 1.31.0
-        run: |
-          id="${{ steps.model-key.outputs.id }}"
-          python3 -m venv "$RUNNER_TEMP/venv"
-          "$RUNNER_TEMP/venv/bin/pip" install --quiet onnx
-          mkdir -p "$RUNNER_TEMP/patched/$id"
-          "$RUNNER_TEMP/venv/bin/python" -I src-tauri/tools/smoke/explicit_pads.py             "$HOME/tessera-models/$id/vision.onnx" "$RUNNER_TEMP/patched/$id/vision.onnx"
-          cp -c "$HOME/tessera-models/$id/text.onnx" "$HOME/tessera-models/$id/tokenizer.model" "$RUNNER_TEMP/patched/$id/"
-          dotnet build src-tauri/tools/smoke -c Release -p:ProbeOnnxRuntime=$NEWER_ORT -o "$RUNNER_TEMP/smoke-ort"
-          echo "::group::1: model as shipped, batch fixed, ONNX Runtime as shipped"
-          "$RUNNER_TEMP/smoke/tessera-smoke" coreml "$HOME/tessera-models/$id" --batch 8 || p1=$?
-          echo "::endgroup::"
-          echo "::group::2: explicit Conv pads, batch fixed, ONNX Runtime as shipped"
-          "$RUNNER_TEMP/smoke/tessera-smoke" coreml "$RUNNER_TEMP/patched/$id" --batch 8 || p2=$?
-          echo "::endgroup::"
-          echo "::group::3: explicit Conv pads, batch fixed, ONNX Runtime $NEWER_ORT"
-          "$RUNNER_TEMP/smoke-ort/tessera-smoke" coreml "$RUNNER_TEMP/patched/$id" --batch 8 || p3=$?
-          echo "::endgroup::"
-          echo "probe exits: 1 ${p1:-0}, 2 ${p2:-0}, 3 ${p3:-0}"
-
       - name: Core logs
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
@@ -395,3 +360,80 @@ jobs:
           name: macos-smoke-core-logs
           if-no-files-found: ignore
           path: ${{ runner.temp }}/data/logs/
+
+  # Temporary: chooses the CoreML fix. Builds candidate vision graphs from
+  # the published model (models/coreml_compat.py: explicit Conv pads, then
+  # float32 for one region at a time) and runs each on CoreML against the
+  # CPU, picture by picture, plus compute units and the model cache.
+  coreml-probe:
+    name: coreml probe (macos-latest)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      DOTNET_NOLOGO: 'true'
+      DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: .NET 10
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build the smoke harness
+        run: dotnet build src-tauri/tools/smoke -c Release -o "$RUNNER_TEMP/smoke"
+
+      - name: Model cache key
+        id: model-key
+        run: |
+          id=$(jq -r '.modelId' models/manifest.json)
+          sums=$(jq -r '[.files[].sha256] | join(" ")' models/manifest.json | shasum -a 256 | cut -c1-16)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "key=model-$id-$sums" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the model
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/tessera-models
+          key: ${{ steps.model-key.outputs.key }}
+
+      - name: Download the model
+        run: |
+          "$RUNNER_TEMP/smoke/tessera-smoke" model "$HOME/tessera-models"
+
+      - name: Candidate graphs
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet onnx==1.23.2 numpy
+          model="$HOME/tessera-models/${{ steps.model-key.outputs.id }}"
+          "$RUNNER_TEMP/venv/bin/python" -I models/coreml_compat.py audit "$model/vision.onnx"
+          "$RUNNER_TEMP/venv/bin/python" -I models/coreml_compat.py variants "$model/vision.onnx" "$RUNNER_TEMP/variants"
+
+      - name: Vision candidates on CoreML (ALL)
+        if: ${{ !cancelled() }}
+        run: |
+          for v in pads ln32 mlp32 attn32 all32; do
+            echo "::group::$v"
+            "$RUNNER_TEMP/smoke/tessera-smoke" coreml "$RUNNER_TEMP/variants/$v/vision.onnx" --label "$v" || echo "probe $v exit $?"
+            echo "::endgroup::"
+          done
+
+      - name: Compute units (explicit pads only)
+        if: ${{ !cancelled() }}
+        run: |
+          for u in CPUAndGPU CPUOnly; do
+            echo "::group::$u"
+            "$RUNNER_TEMP/smoke/tessera-smoke" coreml "$RUNNER_TEMP/variants/pads/vision.onnx" --units "$u" --label pads || echo "probe $u exit $?"
+            echo "::endgroup::"
+          done
+
+      - name: Text tower and the model cache
+        if: ${{ !cancelled() }}
+        run: |
+          model="$HOME/tessera-models/${{ steps.model-key.outputs.id }}"
+          "$RUNNER_TEMP/smoke/tessera-smoke" coreml "$model/text.onnx" --label v2 || echo "probe text exit $?"
+          "$RUNNER_TEMP/smoke/tessera-smoke" coreml "$RUNNER_TEMP/variants/pads/vision.onnx" --label pads \
+            --cache "$RUNNER_TEMP/coreml-cache" --loads 2 || echo "probe cache exit $?"
