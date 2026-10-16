@@ -32,6 +32,12 @@ public sealed class UnsupportedFormatException(string message) : Exception(messa
 /// A finished thumbnail queues the embedding, because the embedding worker
 /// reads the thumbnail rather than the original: one decode of the big file.
 /// </para>
+/// <para>
+/// The thumbnail is turned by the original's EXIF orientation, so it is the
+/// picture as it is meant to be seen, the same shape the scanner recorded
+/// from the headers. A WebP carries no orientation of its own; left as
+/// stored, a phone's portrait shot is a sideways landscape in the grid.
+/// </para>
 /// </remarks>
 public sealed class ThumbnailWorker(
     Db db,
@@ -164,12 +170,15 @@ public sealed class ThumbnailWorker(
         // the original; a second size would cost disk for nothing.
         if (!NeedsSystemDecoder(job.Mime))
         {
-            using var original = DecodeWithSkia(absPath);
-            if (original is not null)
+            var (original, origin) = SkiaFiles.DecodeWithOrigin(absPath);
+            using (original)
             {
-                await WriteAsync(job, original, opts, ct);
-                await RecordSizeAsync(job.ContentId, original.Width, original.Height, ct);
-                return;
+                if (original is not null)
+                {
+                    await WriteAsync(job, original, origin, opts, ct);
+                    await RecordSizeAsync(job.ContentId, original, origin, ct);
+                    return;
+                }
             }
         }
 
@@ -186,10 +195,11 @@ public sealed class ThumbnailWorker(
         try
         {
             await SipsToJpegAsync(absPath, tmp, ct);
-            using var converted = DecodeWithSkia(tmp)
+            var (decoded, origin) = SkiaFiles.DecodeWithOrigin(tmp);
+            using var converted = decoded
                 ?? throw new UnsupportedFormatException($"undecodable: sips produced nothing readable for {job.Mime}");
-            await WriteAsync(job, converted, opts, ct);
-            await RecordSizeAsync(job.ContentId, converted.Width, converted.Height, ct);
+            await WriteAsync(job, converted, origin, opts, ct);
+            await RecordSizeAsync(job.ContentId, converted, origin, ct);
         }
         finally
         {
@@ -206,8 +216,6 @@ public sealed class ThumbnailWorker(
     private static bool NeedsSystemDecoder(string mime) => mime is
         "image/heic" or "image/heif" or "image/heic-sequence" or "image/heif-sequence" or
         "image/avif" or "image/tiff" or "image/x-tiff" or "image/jxl" or "image/x-raw";
-
-    private static SKBitmap? DecodeWithSkia(string path) => SkiaFiles.Decode(path);
 
     private static async Task SipsToJpegAsync(string source, string target, CancellationToken ct)
     {
@@ -234,7 +242,7 @@ public sealed class ThumbnailWorker(
         }
     }
 
-    private async Task WriteAsync(Leased job, SKBitmap source, StorageOptions opts, CancellationToken ct)
+    private async Task WriteAsync(Leased job, SKBitmap source, SKEncodedOrigin origin, StorageOptions opts, CancellationToken ct)
     {
         var scale = (float)opts.ThumbSize / Math.Max(source.Width, source.Height);
         // Never upscale: enlarging a 200px image costs disk and looks worse
@@ -249,7 +257,10 @@ public sealed class ThumbnailWorker(
 
         using var resized = source.Resize(new SKImageInfo(w, h), SKSamplingOptions.Default)
             ?? throw new InvalidOperationException("Resize failed");
-        using var image = SKImage.FromBitmap(resized);
+        var oriented = SkiaFiles.Orient(resized, origin);
+        using var _ = oriented == resized ? null : oriented;
+        (w, h) = (oriented.Width, oriented.Height);
+        using var image = SKImage.FromBitmap(oriented);
         using var data = image.Encode(SKEncodedImageFormat.Webp, opts.JpegQuality)
             ?? throw new InvalidOperationException("WebP encode failed");
 
@@ -282,6 +293,11 @@ public sealed class ThumbnailWorker(
             new { ContentId = contentId, W = w, H = h, Size = size },
             cancellationToken: ct));
     }
+
+    private Task RecordSizeAsync(long contentId, SKBitmap original, SKEncodedOrigin origin, CancellationToken ct) =>
+        SkiaFiles.IsQuarterTurn(origin)
+            ? RecordSizeAsync(contentId, original.Height, original.Width, ct)
+            : RecordSizeAsync(contentId, original.Width, original.Height, ct);
 
     private async Task RecordSizeAsync(long contentId, int w, int h, CancellationToken ct)
     {

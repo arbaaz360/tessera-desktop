@@ -36,9 +36,10 @@ public sealed class ScanTests
         Assert.Equal((12L, 0L, 0L, 12L, 0L), (again.Seen, again.Added, again.Moved, again.Unchanged, again.MarkedGone));
 
         // A move: the same bytes at a new path, the old path gone, the id kept.
+        // Nothing is gone: the old row was retired by the move, not missed.
         File.Move(Path.Combine(photos, "alpha", "img00.png"), Path.Combine(photos, "beta", "moved.png"));
         var moved = await scanner.ScanAsync(root, null, null, None);
-        Assert.Equal((12L, 0L, 1L, 11L, 1L), (moved.Seen, moved.Added, moved.Moved, moved.Unchanged, moved.MarkedGone));
+        Assert.Equal((12L, 0L, 1L, 0L, 11L, 0L), (moved.Seen, moved.Added, moved.Moved, moved.Copies, moved.Unchanged, moved.MarkedGone));
         Assert.Equal(beforeMove, await ContentIdOf(lib.Db, root, "beta/moved.png"));
         Assert.Equal(12, await lib.Timeline.CountAsync(TempLibrary.Account, None));
 

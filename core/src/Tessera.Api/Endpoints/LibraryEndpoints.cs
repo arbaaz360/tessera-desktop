@@ -22,8 +22,8 @@ public static class LibraryEndpoints
         var g = app.MapGroup("/api/library").WithTags("library").RequireUser();
 
         g.MapGet("/", async (
-            CurrentUser me, LibraryRepository library, JobRepository jobs, FreeTier tier,
-            ScanRunner scans, LibraryWatch watch, IImageEmbedder embedder, CancellationToken ct) =>
+            CurrentUser me, LibraryRepository library, JobRepository jobs, FreeTier tier, ContentRepository content,
+            ScanRunner scans, LibraryWatch watch, HeaderBackfill backfill, IImageEmbedder embedder, CancellationToken ct) =>
         {
             var accountId = me.AccountIdOrThrow;
             var roots = await library.RootsAsync(accountId, ct);
@@ -31,6 +31,7 @@ public static class LibraryEndpoints
             var thumbs = await jobs.ThumbnailCountsAsync(ct);
             var embeddings = await jobs.EmbeddingCountsAsync(embedder.ModelId, ct);
             var licence = await tier.StatusAsync(ct);
+            var dates = await content.DateCountsAsync(ct);
 
             return Results.Ok(new
             {
@@ -40,6 +41,14 @@ public static class LibraryEndpoints
                 {
                     pending = embeddings.Pending, done = embeddings.Done, failed = embeddings.Failed,
                     model = embedder.ModelId, ready = embedder.IsReady,
+                },
+                // Where the timeline's dates come from. pending + exif +
+                // filename + mtime = contents with a live location.
+                dates = new
+                {
+                    pending = dates.Pending, done = dates.Done,
+                    exif = dates.Exif, filename = dates.FileName, mtime = dates.Mtime,
+                    unreadable = backfill.Unreadable,
                 },
                 licence = LicenceDto(licence),
                 watch = new { running = watch.Running, lastTick = Api.Iso(watch.LastTick) },
@@ -162,6 +171,7 @@ public static class LibraryEndpoints
             seen = last.FilesSeen,
             added = last.Added,
             moved = last.Moved,
+            copies = last.Copies,
             unchanged = last.Unchanged,
             gone = last.MarkedGone,
             errors = last.Errors,
