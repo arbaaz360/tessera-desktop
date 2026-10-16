@@ -220,7 +220,8 @@ Run [38872561745](https://github.com/arbaaz360/tessera-desktop/actions/runs/3887
 
 ### macOS with CoreML (model v3)
 
-Run [38953158750](https://github.com/arbaaz360/tessera-desktop/actions/runs/38953158750),
+Runs [38953158750](https://github.com/arbaaz360/tessera-desktop/actions/runs/38953158750)
+and [38956260548](https://github.com/arbaaz360/tessera-desktop/actions/runs/38956260548),
 2026-10-16, same runner. Model v3 (`models/README.md`); search library on
 CoreML with fixed batches and its compiled-model cache (`search/README.md`).
 
@@ -229,19 +230,20 @@ CoreML with fixed batches and its compiled-model cache (`search/README.md`).
 | Device with `PreferGpu` true / false | `CoreML`, batch fixed at 8 | `Cpu` |
 | "a solid red square" | red 0.1609, blue 0.1174, green 0.1026 | red 0.1612, blue 0.1176, green 0.1027 |
 | vectors against each other (red, green, blue, sentence) | 1.00000, 1.00000, 1.00000, 0.99996 | |
-| images per second (batch 8, 640x480) | 10.1 | 1.3 |
-| text per sentence (median of 10) | 12.1 ms | 139.6 ms |
-| load, first time (verify plus both towers compiled) | 221 s | 3.0 s |
-| load, from the CoreML cache | 108 s | |
+| images per second (batch 8, 640x480) | 8.5 to 10.1 | 1.2 to 1.3 |
+| text per sentence (median of 10) | 12.1 to 15.2 ms | 139.6 to 147.0 ms |
+| load, first time (verify plus both towers compiled) | 221 to 272 s | 3.0 to 3.7 s |
+| load, from the CoreML cache | 108 to 130 s | |
+| Core ML alone loading the cached vision model (Swift) | 105 s, 56 s again, 79 s CPU-only | |
 | CoreML cache | 2,590 MB | |
 | `dotnet test search` | 41 of 41; `GpuMatchesCpu` CoreML vs CPU: text 0.99986, image 1.00000 | |
 | model download, v3, no token | 559 MB in 9 to 10 s | |
 
-Inside the published core (25 of 25 checks): ready line 728 ms; 51
-pictures scanned and thumbnailed in 3.7 s; `/api/search/status` says
-`device: coreml`; all 51 embedded 289 s after the last thumbnail, of which
-about 220 s is the CoreML compile on first launch; `red.png` first at
-0.160; stdin closed to exit 194 ms.
+Inside the published core (25 of 25 checks, both runs): ready line 728
+to 971 ms; 51 pictures scanned and thumbnailed in 3.7 s;
+`/api/search/status` says `device: coreml`; all 51 embedded 278 to 289 s
+after the last thumbnail, most of it the CoreML compile of a first launch;
+`red.png` first at 0.160; stdin closed to exit 126 to 194 ms.
 
 ## Not done
 
@@ -254,9 +256,9 @@ about 220 s is the CoreML compile on first launch; `red.png` first at
 - The licence cache is not HMAC-protected (SRS 9.3 rule 5).
 - No deactivate command (SRS FR-47).
 - **CoreML on a real Mac is unmeasured.** The runner's Core ML has no GPU
-  or Neural Engine (every op on its CPU backend), and there a CoreML start
-  takes 221 s the first time and 108 s from a 2.6 GB cache, at every
-  launch (`search/README.md`, Not done).
+  or Neural Engine for ML (every op on its CPU backend), and there a
+  CoreML start takes 221 to 272 s the first time and 108 to 130 s from a
+  2.6 GB cache, at every launch (`search/README.md`, Not done).
 - The DMG is unsigned. A Mac that downloads it quarantines it, and Gatekeeper
   refuses an unsigned app; testers can clear the flag with
   `xattr -dr com.apple.quarantine "/Applications/Tessera Desktop.app"`.

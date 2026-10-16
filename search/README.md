@@ -133,26 +133,29 @@ the tower is the other 350 MB.
 | `RequireStaticInputShapes`, `SpecializationStrategy`, `AllowLowPrecisionAccumulationOnGPU` | defaults | shapes are static once fixed; a fast-prediction specialisation cannot be judged without a GPU to run on; low-precision accumulation is what float32 arithmetic is there to avoid |
 
 On the `macos-latest` runner (macOS 26, Apple silicon, 3 cores, ONNX Runtime
-1.24.4), model v3, run
-[38953158750](https://github.com/arbaaz360/tessera-desktop/actions/runs/38953158750):
+1.24.4), model v3, runs
+[38953158750](https://github.com/arbaaz360/tessera-desktop/actions/runs/38953158750)
+and [38956260548](https://github.com/arbaaz360/tessera-desktop/actions/runs/38956260548):
 
 | | CoreML | CPU |
 |---|---|---|
 | Device with `PreferGpu` true / false | `CoreML`, batch fixed at 8 | `Cpu` |
 | "a solid red square" over red, green, blue swatches | red 0.1609, blue 0.1174, green 0.1026 | red 0.1612, blue 0.1176, green 0.1027 |
 | Vectors against each other (red, green, blue, sentence) | 1.00000, 1.00000, 1.00000, 0.99996 | |
-| Images/s, batch 8, 640×480 sources | 10.1 (the test: 9.8 from 1600×1200) | 1.3 |
+| Images/s, batch 8, 640×480 sources | 8.5 – 10.1 (the test: 9.8 from 1600×1200) | 1.2 – 1.3 |
 | One image alone (padded to 8) | 1.33 img/s | 1.62 img/s |
-| Text, median of 10 | 12.1 ms | 139.6 ms |
-| Load, first time (download verified, both towers compiled) | 221 s: vision 118 s, text 102 s | 3.0 s |
-| Load, from the cache | 108 s: vision 57 s, text 51 s | |
+| Text, median of 10 | 12.1 – 15.2 ms | 139.6 – 147.0 ms |
+| Load, first time (download verified, both towers compiled) | 221 – 272 s: vision 118 – 148 s, text 102 – 123 s | 3.0 – 3.7 s |
+| Load, from the cache | 108 – 130 s: vision 57 – 68 s, text 51 – 61 s | |
 | Cache on disk | 2,590 MB (79 files) | |
 
-The CoreML load is the cost to watch. In the probe a vision tower took
-173 s cold and still 98 s from the cache in a new process: the cache saves
-ONNX Runtime's conversion and Core ML's compile, and the rest is Core ML
-preparing the compiled model. On the runner that is CPU-only Core ML in a
-virtual machine; a real Mac is likely faster, and unmeasured.
+The CoreML load is the cost to watch. The cache saves ONNX Runtime's
+conversion and Core ML's compile, about half; the rest is Core ML itself.
+Loading the cached compiled vision model with Core ML alone
+(`tools/smoke/coreml_load.swift`, no ONNX Runtime) took 105 s, 56 s again,
+and 79 s CPU-only. Core ML on the runner lists a GPU ("Apple Paravirtual
+device") but its compute plan put all 536 ops on the CPU. A real Mac is
+likely faster, and unmeasured.
 
 `src-tauri/tools/smoke` holds the tools that chose these:
 `tessera-smoke coreml <tower.onnx> --units … --format … --cache …
@@ -251,8 +254,8 @@ Both pinned to the same version, the newest the DirectML package reaches.
   which Core ML sees no GPU and no Neural Engine: every op ran on its CPU
   backend (compute plan: 536 of 536). A real Mac will put work on the GPU;
   its speed, its load time and its vectors against the CPU are unmeasured.
-- **A CoreML start is slow on the runner and its cache is large**: 221 s
-  for both towers the first time, 108 s from the cache, which takes 2.6 GB
+- **A CoreML start is slow on the runner and its cache is large**: 221 – 272 s
+  for both towers the first time, 108 – 130 s from the cache, which takes 2.6 GB
   next to a 559 MB model (above). Search waits for it at every launch. The
   core could answer on the CPU (3 s to load) and swap CoreML in when it is
   ready; vectors from the two agree to 0.99996, so the index does not care.
