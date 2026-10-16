@@ -353,6 +353,39 @@ jobs:
           "$RUNNER_TEMP/smoke/tessera-smoke" core "$RUNNER_TEMP/core/tessera-core" \
             "$RUNNER_TEMP/library" "$RUNNER_TEMP/data" "${models[@]}" --timeout 600
 
+      # Not a gate. CoreML refuses the shipped vision model on this runner
+      # ("Required param 'pad' is missing"; the search step falls back to the
+      # CPU). This tries the candidate fixes, so the one proposed for models/
+      # or search/ has been seen to work on a Mac:
+      #   A  the patch-embedding Conv's padding spelled out, ONNX Runtime as shipped
+      #   B  the model as shipped, a newer ONNX Runtime
+      #   C  both
+      # Remove it once CoreML loads the shipped model.
+      - name: CoreML probe (candidate fixes)
+        if: ${{ !cancelled() && steps.model.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          NEWER_ORT: 1.31.0
+        run: |
+          id="${{ steps.model-key.outputs.id }}"
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet onnx
+          mkdir -p "$RUNNER_TEMP/patched/$id"
+          "$RUNNER_TEMP/venv/bin/python" -I src-tauri/tools/smoke/explicit_pads.py \
+            "$HOME/tessera-models/$id/vision.onnx" "$RUNNER_TEMP/patched/$id/vision.onnx"
+          cp -c "$HOME/tessera-models/$id/text.onnx" "$HOME/tessera-models/$id/tokenizer.model" "$RUNNER_TEMP/patched/$id/"
+          dotnet build src-tauri/tools/smoke -c Release -p:ProbeOnnxRuntime=$NEWER_ORT -o "$RUNNER_TEMP/smoke-ort"
+          echo "::group::A: explicit Conv pads, ONNX Runtime as shipped"
+          "$RUNNER_TEMP/smoke/tessera-smoke" search "$RUNNER_TEMP/patched" --require-gpu --load-from "$RUNNER_TEMP/patched/$id" || a=$?
+          echo "::endgroup::"
+          echo "::group::B: model as shipped, ONNX Runtime $NEWER_ORT"
+          "$RUNNER_TEMP/smoke-ort/tessera-smoke" search "$HOME/tessera-models" --require-gpu || b=$?
+          echo "::endgroup::"
+          echo "::group::C: explicit Conv pads, ONNX Runtime $NEWER_ORT"
+          "$RUNNER_TEMP/smoke-ort/tessera-smoke" search "$RUNNER_TEMP/patched" --require-gpu --load-from "$RUNNER_TEMP/patched/$id" || c=$?
+          echo "::endgroup::"
+          echo "probe exits: A ${a:-0}, B ${b:-0}, C ${c:-0}"
+
       - name: Core logs
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4

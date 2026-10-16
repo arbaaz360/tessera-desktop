@@ -18,6 +18,7 @@ activates licences, and is what CI packages.
 | `tauri.stub.conf.json` | merged with `--config`: static dev page instead of the web app |
 | `capabilities/default.json` | `core:default` only; no plugin is exposed to JavaScript |
 | `tools/stub-core/` | a stand-in core for testing the shell on its own |
+| `tools/smoke/` | the CI smoke harness: generated pictures, the model download, search on GPU and CPU, the real core through the handshake |
 | `dev-page/` | a page that calls every command and prints the answers |
 
 ## Build and test

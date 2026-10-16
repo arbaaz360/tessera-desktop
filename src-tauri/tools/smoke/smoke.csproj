@@ -20,4 +20,11 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.0" />
   </ItemGroup>
 
+  <!-- CI's CoreML probe builds a second copy with -p:ProbeOnnxRuntime=<version>
+       to try a newer ONNX Runtime than the search library ships with.
+       macOS only: on Windows the library uses the DirectML package instead. -->
+  <ItemGroup Condition="'$(ProbeOnnxRuntime)' != ''">
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="$(ProbeOnnxRuntime)" />
+  </ItemGroup>
+
 </Project>

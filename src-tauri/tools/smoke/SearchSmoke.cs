@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Numerics.Tensors;
 using Microsoft.Extensions.Logging;
+using Microsoft.ML.OnnxRuntime;
 using SkiaSharp;
 using Tessera.Desktop.Search;
 
@@ -65,9 +66,16 @@ internal static class SearchSmoke
         return report.Finish();
     }
 
-    public static async Task<int> RunAsync(string modelsDir, bool requireGpu)
+    /// <param name="loadFrom">
+    /// A folder holding vision.onnx, text.onnx and tokenizer.model to load as
+    /// they are, without the manifest's hashes: how the CoreML probe tries a
+    /// rewritten model. Null loads through the store, as the core does.
+    /// </param>
+    public static async Task<int> RunAsync(string modelsDir, bool requireGpu, string? loadFrom)
     {
-        var report = new Report($"Search with the real model ({System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier}, {Environment.ProcessorCount} cores)");
+        var ort = OrtEnv.Instance().GetVersionString();
+        var report = new Report($"Search with the real model ({System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier}, "
+            + $"{Environment.ProcessorCount} cores, ONNX Runtime {ort}{(loadFrom is null ? "" : $", model from {loadFrom}")})");
         var manifest = ModelManifest.Embedded();
         using var logs = Logs();
         using var store = new ModelStore(Options(modelsDir, manifest, false), null, logs.CreateLogger<ModelStore>());
@@ -80,7 +88,7 @@ internal static class SearchSmoke
             var label = preferGpu ? "PreferGpu=true" : "PreferGpu=false";
             try
             {
-                vectors[preferGpu] = await MeasureAsync(report, label, preferGpu, requireGpu,
+                vectors[preferGpu] = await MeasureAsync(report, label, preferGpu, requireGpu, loadFrom,
                     new SiglipEmbedder(Options(modelsDir, manifest, preferGpu), store, logs.CreateLogger<SiglipEmbedder>(), manifest));
             }
             catch (Exception e)
@@ -100,7 +108,8 @@ internal static class SearchSmoke
         return report.Finish();
     }
 
-    private static async Task<float[][]> MeasureAsync(Report report, string label, bool preferGpu, bool requireGpu, SiglipEmbedder embedder)
+    private static async Task<float[][]> MeasureAsync(
+        Report report, string label, bool preferGpu, bool requireGpu, string? loadFrom, SiglipEmbedder embedder)
     {
         using var owned = embedder;
         using var red = Images.Solid(new SKColor(255, 0, 0), 256, 256);
@@ -110,7 +119,15 @@ internal static class SearchSmoke
         try
         {
             var sw = Stopwatch.StartNew();
-            await embedder.EnsureReadyAsync(new Printer(), CancellationToken.None);
+            if (loadFrom is null)
+            {
+                await embedder.EnsureReadyAsync(new Printer(), CancellationToken.None);
+            }
+            else
+            {
+                embedder.LoadFromDirectory(loadFrom);
+            }
+
             var device = embedder.Device?.ToString() ?? "none";
             report.Number($"{label}: Device", device + (embedder.DeviceName is { } n ? $" ({n})" : ""));
             report.Number($"{label}: load (verify + sessions)", sw.Elapsed.TotalSeconds, "s");
