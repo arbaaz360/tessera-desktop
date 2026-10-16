@@ -60,9 +60,8 @@ Tests on main: core 174, search 39.
 | Not done | Why |
 |---|---|
 | macOS GPU search | CI builds an unsigned arm64 DMG (64.8 MiB), the app launches, and the core passes its checks on macOS with search on CPU. CoreML refuses the model (the export's patch Conv needs explicit `pads`, then a fixed batch size); fixes proposed, not yet verified |
-| GitHub Actions | stopped starting jobs on 2026-10-16: the account's payment or spending limit needs fixing in GitHub Billing |
 | Signing, updater key, Gumroad product id | placeholders until the certificates and the product exist; Tauri will not sign the core's 354 files on macOS, which notarization needs |
-| UI tested by hand through the installer | in progress |
+| Installer walk by hand (SmartScreen, setup wizard) | the owner is doing it; the UI itself was clicked through and seven fixes are merged |
 
 ## Build
 
