@@ -9,7 +9,7 @@ and gets `IImageEmbedder` and `IVectorIndex` as singletons.
 |---|---|
 | `src/Tessera.Desktop.Search.Abstractions` | the interfaces; written by the coordinator, frozen |
 | `src/Tessera.Desktop.Search` | the implementation |
-| `tests/Tessera.Desktop.Search.Tests` | xunit; 37 tests |
+| `tests/Tessera.Desktop.Search.Tests` | xunit; 39 tests |
 | `../models` | the export script, the manifest, the published model files |
 
 ## Build and test
@@ -32,7 +32,7 @@ Environment variables, all optional, none used by the product:
 | `TESSERA_MODELS_DIR` | a folder with `vision.onnx`, `text.onnx`, `tokenizer.model` for the tests |
 | `TESSERA_QUALITATIVE_DIR` | a folder of non-personal images for the qualitative test |
 | `TESSERA_MODELS_TOKEN` | a GitHub token; lets `ModelStore` fetch release assets through the API from a private repository. Not needed for the shipped manifest, whose files are in the public `arbaaz360/siglip2-base-onnx`. Sent to github.com hosts only |
-| `TESSERA_REAL_DOWNLOAD=1` | with the token: one test downloads the real 755 MB release into `%TEMP%` and verifies it |
+| `TESSERA_REAL_DOWNLOAD=1` | one test downloads the real 559 MB release into `%TEMP%` with no token, as a buyer's first run does, and verifies it |
 | `TESSERA_CPU_THREADS` | thread count for the CPU throughput test |
 
 ## What it does
@@ -91,13 +91,34 @@ second on the GPU.
 A 50,000-image library at CPU batch-8 speed embeds in about 80 minutes; on
 the RTX 5060 Ti in about 7.
 
+Model v2 changed only the text tower (its token table is int8; see
+`models/README.md`). Measured in a fresh process per file, five interleaved
+rounds, 8 threads, Python ONNX Runtime on the CPU:
+
+| Text tower | v1 | v2 |
+|---|---|---|
+| File | 565 MB | 369 MB |
+| Private memory after load | 1,144 MB | 555 MB |
+| Load | 1.4 – 1.9 s | 0.9 – 1.2 s |
+| One sentence, median | 23 – 24.5 ms | 22 – 26 ms |
+| One sentence on DirectML (.NET test) | 6.9 ms | 5.4 ms |
+
+The CPU provider has no float16 kernels for most operators and widens
+float16 weights to float32 when it loads them: v1's 1,144 MB is the float32
+size of the whole tower (the float32 export is 1,129 MB). v2's table stays
+int8 (197 MB) and only the 64 rows a sentence uses are widened; the rest of
+the tower is the other 350 MB.
+
 ### Fidelity
 
 | Check | Result |
 |---|---|
-| ONNX vs PyTorch, ten screenshots, ten sentences (export) | cosine ≥ 0.99999 |
+| ONNX vs PyTorch, ten screenshots (export) | image cosine ≥ 0.99999 |
+| ONNX vs PyTorch, ten sentences (export) | text cosine ≥ 0.99928 from model v2 (int8 token table; v1 ≥ 0.99999) |
 | .NET vs reference embeddings, 256×256 fixtures | cosine ≥ 0.99999 |
 | .NET vs reference embeddings, fixtures that need resizing | cosine ≥ 0.9968 (SkiaSharp trilinear vs PIL bilinear) |
+| .NET text vs reference, 14 sentences | cosine ≥ 0.999 (test floor) |
+| DirectML vs CPU, same files (`GpuMatchesCpu`) | text ≥ 0.999996, image ≥ 0.99998 |
 | Same image twice | bit-identical vectors |
 | "a solid red image" against red, blue, green swatches | red first; blue and green likewise |
 
@@ -116,13 +137,18 @@ the RTX 5060 Ti in about 7.
 
 | | |
 |---|---|
-| Size | 755 MB (vision 186, text 565, tokenizer 4) |
-| Real download of the release through the API, verified | 177 s on this connection (34 Mbit/s), all three hashes matched |
+| Size, model v2 | 559 MB (vision 186, text 369, tokenizer 4) |
+| Size, model v1 | 755 MB (vision 186, text 565, tokenizer 4) |
+| Real download of v2 from the public release, no token, verified (2026-10-16) | 73.7 s (61 Mbit/s), all three hashes matched |
+| Real download of v1 through the API, verified (2026-10-16) | 177 s (34 Mbit/s), all three hashes matched |
 
-The text tower is three times the vision tower because the Gemma vocabulary
-is 256,000 rows; its embedding table alone is 393 MB in float16. Quantising
-that one table to int8 would take about 200 MB off the download and is the
-obvious next cut if size matters.
+The text tower was three times the vision tower because the Gemma
+vocabulary is 256,000 rows; its embedding table alone is 393 MB in float16.
+v2 stores that table as int8 with a scale per row (197 MB), which keeps
+every first hit of the nine ground-truth queries and halves the text
+tower's memory on the CPU. The vision tower can lose another 89 MB with
+int8 weights, at the price of a new `modelId`; `models/README.md` has the
+numbers and why that is not in v2.
 
 ### Qualitative: 200 screenshots, ten queries
 
@@ -177,6 +203,12 @@ Both pinned to the same version, the newest the DirectML package reaches.
   exists on the class; the core only sees the interface. A batch method on
   the interface would let the worker get the 7× DirectML gain without
   casting to the concrete type.
+- **A model with a new `modelId` cannot ship yet.** `SearchOptions.ModelId`
+  in the frozen Abstractions defaults to `siglip2-base-patch16-256`, the
+  core does not set it, and `AddTesseraSearch` throws when the embedded
+  manifest names another id. Any vision-tower change (the int8-weight
+  vision variant saves 89 MB and passes the quality rule) needs that
+  default to follow the manifest, or the core to pass the manifest's id.
 - The qualitative set is screenshots because that is what this machine
   holds that is not a person's photos. A reference-library sample from a
   real artist would say more about R-01.

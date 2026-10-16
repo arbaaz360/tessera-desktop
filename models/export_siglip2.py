@@ -11,6 +11,17 @@ splits them (one graph per tower, pooled output, nothing shared), but the
 export goes through torch.onnx.export on two thin wrapper modules so the
 L2 normalisation is inside the graph and the consumer never has to do it.
 
+Two size options, each measured on its own (see models/README.md):
+
+    --text-table int8     the text tower's token table (256,000 x 768, 393 MB
+                          of the 565 MB) as int8 with one float16 scale per
+                          row; only the 64 gathered rows are dequantised, in
+                          the graph. Every other weight stays float16.
+    --vision-matmul int8  ONNX Runtime dynamic quantisation of the vision
+                          tower's weight MatMuls (int8 weights, activations
+                          quantised per call). A new modelId, because image
+                          vectors change and stored indexes go stale.
+
 Also written to the output dir:
 
     tokenizer.model   the Gemma SentencePiece model, copied from the checkpoint
@@ -23,6 +34,7 @@ Usage (from the repo root, inside models/.venv):
     python models/export_siglip2.py                 # export + verify
     python models/export_siglip2.py --bench         # also time CPU variants
     python models/export_siglip2.py --images DIR    # verify on real images
+    python models/export_siglip2.py --compare       # build and verify every variant
 
 Nothing here is needed at run time; the product downloads the published
 files and verifies them against the embedded manifest.
@@ -49,8 +61,10 @@ import torch.nn.functional as F
 
 HF_MODEL = "google/siglip2-base-patch16-256"
 MODEL_ID = "siglip2-base-patch16-256"
-RELEASE_TAG = "models-siglip2-base-v1"
-REPO = "arbaaz360/tessera-desktop"
+RELEASE_TAG = "models-siglip2-base-v2"
+MANIFEST_VERSION = 2
+# Public, model-only repository: buyers download with no token (owner, 2026-10-16).
+REPO = "arbaaz360/siglip2-base-onnx"
 OPSET = 17
 IMAGE_SIZE = 256
 TEXT_LEN = 64
@@ -220,6 +234,157 @@ def to_fp16_weights_fp32_compute(src: Path, dst: Path, min_elements: int = 1024)
     onnx.save(model, str(dst))
 
 
+def int8_token_table(src: Path, dst: Path, min_rows: int = 100_000) -> dict:
+    """Store the text tower's token embedding table as int8 with one float16
+    scale per row (symmetric, scale = max|row| / 127), and dequantise only
+    the rows the sentence uses:
+
+        Gather(table) -> X          becomes   Gather(table_q8) -> Cast(float16) --.
+                                              Gather(row_scale) ------------------ Mul -> X
+
+    Standard opset-17 ops only, so every execution provider runs it, and
+    the 196 MB int8 table is never expanded in memory. Every other weight
+    is left as it is in `src` (float16)."""
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    model = onnx.load(str(src))
+    g = model.graph
+    inits = {i.name: i for i in g.initializer}
+    users = {}
+    for node in g.node:
+        for name in node.input:
+            users.setdefault(name, []).append(node)
+    tables = [n for n in g.node if n.op_type == "Gather" and n.input[0] in inits
+              and inits[n.input[0]].dims[0] >= min_rows]
+    if len(tables) != 1:
+        raise RuntimeError(f"expected one token-table Gather, found {len(tables)}")
+    gather = tables[0]
+    table_name = gather.input[0]
+    if len(users[table_name]) != 1:
+        raise RuntimeError(f"{table_name} has {len(users[table_name])} consumers; expected 1")
+    axis = next((a.i for a in gather.attribute if a.name == "axis"), 0)
+    if axis != 0:
+        raise RuntimeError(f"token-table Gather on axis {axis}")
+
+    init = inits[table_name]
+    dtype = init.data_type
+    w = numpy_helper.to_array(init).astype(np.float32)
+    rows, dims = w.shape
+    np_dtype = np.float16 if dtype == TensorProto.FLOAT16 else np.float32
+    peak = np.abs(w).max(axis=1, keepdims=True)
+    scale = (np.where(peak > 0, peak, 1.0) / 127.0).astype(np_dtype)
+    if not (scale > 0).all():
+        raise RuntimeError("a row scale underflowed to zero in the stored precision")
+    # Round against the stored (float16) scale so q * scale is what the graph computes.
+    q = np.clip(np.rint(w / scale.astype(np.float32)), -127, 127).astype(np.int8)
+    deq = q.astype(np.float32) * scale.astype(np.float32)
+    err = deq - w
+    row_cos = (deq * w).sum(1) / np.maximum(
+        np.linalg.norm(deq, axis=1) * np.linalg.norm(w, axis=1), 1e-12)
+
+    q_name, s_name = table_name + ".int8", table_name + ".row_scale"
+    out = gather.output[0]
+    q_out, s_out, c_out = out + "_int8", out + "_scale", out + "_cast"
+    new_inits = [i for i in g.initializer if i.name != table_name]
+    new_inits += [numpy_helper.from_array(q, q_name), numpy_helper.from_array(scale, s_name)]
+    del g.initializer[:]
+    g.initializer.extend(new_inits)
+
+    gather.input[0] = q_name
+    gather.output[0] = q_out
+    extra = [
+        helper.make_node("Gather", [s_name, gather.input[1]], [s_out], axis=0,
+                         name=gather.name + "_row_scale"),
+        helper.make_node("Cast", [q_out], [c_out], to=dtype, name=gather.name + "_dequant_cast"),
+        helper.make_node("Mul", [c_out, s_out], [out], name=gather.name + "_dequant_mul"),
+    ]
+    nodes = list(g.node)
+    at = nodes.index(gather) + 1
+    del g.node[:]
+    g.node.extend(nodes[:at] + extra + nodes[at:])
+    onnx.checker.check_model(model)
+    onnx.save(model, str(dst))
+    return {
+        "table": table_name, "rows": int(rows), "dims": int(dims),
+        "row_cosine_min": float(row_cos.min()), "row_cosine_mean": float(row_cos.mean()),
+        "abs_error_max": float(np.abs(err).max()),
+        "rms_error_over_rms_weight": float(np.sqrt((err ** 2).mean() / (w ** 2).mean())),
+    }
+
+
+def int8_matmul_weights(src: Path, dst: Path, min_elements: int = 65_536) -> dict:
+    """Weight-only int8: every MatMul whose B is a large float16 initializer
+    [K, N] is stored as int8 with one scale per output column and rebuilt in
+    the graph (Cast -> Mul -> Cast). Every input is a constant, so ONNX
+    Runtime folds the chain into float16 weights when the session loads: the
+    download shrinks, the arithmetic is still float16, and activations are
+    never quantised. The rebuild is float32 because the CPU provider, which
+    does the folding, has no float16 Mul; a float16 Mul would not fold and
+    would run on every call."""
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    model = onnx.load(str(src))
+    g = model.graph
+    inits = {i.name: i for i in g.initializer}
+    users = {}
+    for node in g.node:
+        for name in node.input:
+            users.setdefault(name, []).append(node)
+    targets = sorted({n.input[1] for n in g.node if n.op_type == "MatMul" and n.input[1] in inits
+                      and inits[n.input[1]].data_type == TensorProto.FLOAT16
+                      and len(inits[n.input[1]].dims) == 2
+                      and int(np.prod(inits[n.input[1]].dims)) >= min_elements
+                      and all(u.op_type == "MatMul" and u.input[1] == n.input[1] for u in users[n.input[1]])})
+    worst = 1.0
+    params = 0
+    rebuilt, new_inits = [], []
+    for name in targets:
+        w = numpy_helper.to_array(inits[name]).astype(np.float32)
+        peak = np.abs(w).max(axis=0, keepdims=True)
+        scale = (np.where(peak > 0, peak, 1.0) / 127.0).astype(np.float32)
+        q = np.clip(np.rint(w / scale), -127, 127).astype(np.int8)
+        deq = (q.astype(np.float32) * scale).astype(np.float16).astype(np.float32)
+        col_cos = (deq * w).sum(0) / np.maximum(np.linalg.norm(deq, axis=0) * np.linalg.norm(w, axis=0), 1e-12)
+        worst = min(worst, float(col_cos.min()))
+        params += w.size
+        new_inits += [numpy_helper.from_array(q, name + ".int8"), numpy_helper.from_array(scale, name + ".col_scale")]
+        rebuilt += [
+            helper.make_node("Cast", [name + ".int8"], [name + "_f32"], to=TensorProto.FLOAT,
+                             name=name + "_dequant_cast"),
+            helper.make_node("Mul", [name + "_f32", name + ".col_scale"], [name + "_scaled"],
+                             name=name + "_dequant_mul"),
+            helper.make_node("Cast", [name + "_scaled"], [name], to=TensorProto.FLOAT16,
+                             name=name + "_dequant_to_fp16"),
+        ]
+    keep = [i for i in g.initializer if i.name not in set(targets)]
+    del g.initializer[:]
+    g.initializer.extend(keep + new_inits)
+    nodes = list(g.node)
+    del g.node[:]
+    g.node.extend(rebuilt + nodes)  # weights first, so every MatMul sees B defined
+    onnx.checker.check_model(model)
+    onnx.save(model, str(dst))
+    return {"matmuls": len(targets), "params": params, "column_cosine_min": worst}
+
+
+def int8_vision_matmuls(src_fp32: Path, dst: Path, per_channel: bool) -> None:
+    """ONNX Runtime dynamic quantisation of the weight MatMuls only: int8
+    weights stored in the file, activations quantised to uint8 on every
+    call (MatMulInteger). Must start from the float32 graph; everything
+    that is not a weight MatMul stays float32."""
+    from onnxruntime.quantization import QuantType, quantize_dynamic
+
+    quantize_dynamic(
+        str(src_fp32), str(dst),
+        op_types_to_quantize=["MatMul"],
+        weight_type=QuantType.QInt8,
+        per_channel=per_channel,
+        extra_options={"MatMulConstBOnly": True},
+    )
+
+
 def cosine(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     a = a / np.linalg.norm(a, axis=-1, keepdims=True)
     b = b / np.linalg.norm(b, axis=-1, keepdims=True)
@@ -319,6 +484,16 @@ def main() -> int:
                     help="skip the torch export when out/*.fp32.onnx already exist")
     ap.add_argument("--variant", choices=["fp16", "fp16w"], default="fp16",
                     help="fp16: float16 compute graph; fp16w: float16 weights, float32 compute")
+    ap.add_argument("--text-table", choices=["fp16", "int8"], default="int8",
+                    help="int8 (shipped from v2): the token table as int8 with a float16 scale per row")
+    ap.add_argument("--vision-matmul", choices=["fp16", "int8", "int8w"], default="fp16",
+                    help="int8: dynamic quantisation of the vision MatMuls; int8w: int8 weights "
+                         "rebuilt to float16 in the graph. Either is a new modelId")
+    ap.add_argument("--per-channel", action="store_true",
+                    help="with --vision-matmul int8: one scale per output column instead of per tensor")
+    ap.add_argument("--compare", action="store_true",
+                    help="build and verify every variant, whatever is published")
+    ap.add_argument("--release", default=RELEASE_TAG, help="release tag the manifest URLs name")
     args = ap.parse_args()
 
     out: Path = args.out
@@ -391,6 +566,40 @@ def main() -> int:
         fn(text_fp32, tp)
         log(f"{name}: vision {vp.stat().st_size / 1e6:.1f} MB, text {tp.stat().st_size / 1e6:.1f} MB")
 
+    # ---- size options, each paired with the other tower unchanged ----------
+    # (vision, text) pairs to verify; the base variant's other tower is reused.
+    base_v, base_t, _ = variants[args.variant]
+    quantised: dict[str, tuple[Path, Path]] = {}
+    table_stats = None
+    if args.text_table == "int8" or args.compare:
+        tq = out / "text.int8table.onnx"
+        table_stats = int8_token_table(base_t, tq)
+        quantised["int8table"] = (base_v, tq)
+        log(f"int8table: text {tq.stat().st_size / 1e6:.1f} MB; table rows cosine min "
+            f"{table_stats['row_cosine_min']:.5f}, mean {table_stats['row_cosine_mean']:.5f}")
+    if args.vision_matmul == "int8" or args.compare:
+        for per_channel in ([False, True] if args.compare else [args.per_channel]):
+            suffix = "int8matmul_pc" if per_channel else "int8matmul"
+            vq = out / f"vision.{suffix}.onnx"
+            int8_vision_matmuls(vision_fp32, vq, per_channel)
+            quantised[suffix] = (vq, base_t)
+            log(f"{suffix}: vision {vq.stat().st_size / 1e6:.1f} MB")
+    weight_stats = None
+    if args.vision_matmul == "int8w" or args.compare:
+        if args.variant != "fp16":
+            raise SystemExit("--vision-matmul int8w starts from the float16 graph (--variant fp16)")
+        vw = out / "vision.int8weights.onnx"
+        weight_stats = int8_matmul_weights(base_v, vw)
+        quantised["int8weights"] = (vw, base_t)
+        log(f"int8weights: vision {vw.stat().st_size / 1e6:.1f} MB; {weight_stats['matmuls']} MatMuls, "
+            f"column cosine min {weight_stats['column_cosine_min']:.5f}")
+    publish_v = base_v
+    if args.vision_matmul == "int8":
+        publish_v = quantised["int8matmul_pc" if args.per_channel else "int8matmul"][0]
+    elif args.vision_matmul == "int8w":
+        publish_v = quantised["int8weights"][0]
+    publish_t = quantised["int8table"][1] if args.text_table == "int8" else base_t
+
     # ---- verification inputs ---------------------------------------------
     images = synthetic_images()
     if args.images:
@@ -410,11 +619,21 @@ def main() -> int:
 
     # ---- verify every variant against PyTorch ----------------------------
     verify = {"model": HF_MODEL, "opset": OPSET, "images": [n for n, _ in images],
-              "sentences": SENTENCES, "variants": {}}
+              "sentences": SENTENCES, "variants": {}, "files": {}}
+    if table_stats:
+        verify["int8_token_table"] = table_stats
+    if weight_stats:
+        verify["int8_vision_weights"] = weight_stats
     to_check = {"fp32": (vision_fp32, text_fp32)}
     for name, (vp, tp, _) in variants.items():
         if vp.exists():
             to_check[name] = (vp, tp)
+    to_check.update(quantised)
+    for vp, tp in to_check.values():
+        for p in (vp, tp):
+            verify["files"][p.name] = p.stat().st_size
+    worst_image: dict[Path, float] = {}
+    worst_text: dict[Path, float] = {}
     for name, (vp, tp) in to_check.items():
         sv, st = ort_session(vp), ort_session(tp)
         vin = sv.get_inputs()[0]
@@ -439,6 +658,10 @@ def main() -> int:
             f"{ni.min():.4f}-{ni.max():.4f} / {nt.min():.4f}-{nt.max():.4f}")
         if name == args.variant or name == "fp32":
             assert ci.min() >= 0.999 and ct.min() >= 0.999, f"{name} drifted from PyTorch"
+        worst_image[vp], worst_text[tp] = float(ci.min()), float(ct.min())
+    # The adoption floor for whatever is published, quantised or not (models/README.md).
+    assert worst_image[publish_v] >= 0.995, f"{publish_v.name} is below the 0.995 floor"
+    assert worst_text[publish_t] >= 0.995, f"{publish_t.name} is below the 0.995 floor"
 
     # ---- optional CPU timing of the variants ------------------------------
     if args.bench:
@@ -473,9 +696,9 @@ def main() -> int:
     (out / "verify.json").write_text(json.dumps(verify, indent=2))
 
     # ---- choose the published files ---------------------------------------
-    vp, tp, _ = variants[args.variant]
-    shutil.copyfile(vp, out / "vision.onnx")
-    shutil.copyfile(tp, out / "text.onnx")
+    shutil.copyfile(publish_v, out / "vision.onnx")
+    shutil.copyfile(publish_t, out / "text.onnx")
+    log(f"published: {publish_v.name} as vision.onnx, {publish_t.name} as text.onnx")
     shutil.copyfile(snap / "tokenizer.model", out / "tokenizer.model")
     if not args.keep_fp32:
         vision_fp32.unlink(missing_ok=True)
@@ -513,18 +736,27 @@ def main() -> int:
         p = out / name
         files.append({
             "name": name, "bytes": p.stat().st_size, "sha256": sha256_of(p),
-            "url": f"https://github.com/{REPO}/releases/download/{RELEASE_TAG}/{name}",
+            "url": f"https://github.com/{REPO}/releases/download/{args.release}/{name}",
         })
+    weights = "float16" if args.variant == "fp16" else "float16-weights-float32-compute"
+    if args.text_table == "int8":
+        weights += "; text token table int8, per-row scale"
+    if args.vision_matmul == "int8":
+        weights += "; vision MatMuls int8, dynamic"
+    elif args.vision_matmul == "int8w":
+        weights += "; vision MatMul weights int8, per-column scale"
     manifest = {
-        "modelId": MODEL_ID,
-        "version": 1,
+        # Image vectors change only when the vision tower does; a new id makes
+        # the core rebuild every stored index instead of mixing two spaces.
+        "modelId": MODEL_ID + ("-q8" if args.vision_matmul != "fp16" else ""),
+        "version": MANIFEST_VERSION,
         "source": HF_MODEL,
         "licence": "Apache-2.0",
-        "release": RELEASE_TAG,
+        "release": args.release,
         "dimensions": DIMS,
         "imageSize": IMAGE_SIZE,
         "textLength": TEXT_LEN,
-        "weights": "float16" if args.variant == "fp16" else "float16-weights-float32-compute",
+        "weights": weights,
         "inputs": {"vision": {"name": vin.name, "type": vin.type},
                    "text": {"name": tin.name, "type": tin.type}},
         "tokenizer": tokenizer_facts,

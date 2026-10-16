@@ -193,6 +193,31 @@ public class EmbedderTests : IClassFixture<ModelFixture>
         }
     }
 
+    /// <summary>
+    /// The GPU provider runs the same graphs, including the text tower's int8
+    /// token table (Gather, Cast, Mul), and must land on the same vectors.
+    /// </summary>
+    [Fact]
+    public void GpuMatchesCpu()
+    {
+        var m = Model();
+        if (m is null) return;
+        if (_models.Gpu is null) { _out.WriteLine("skipped: no GPU provider on this machine"); return; }
+        var expected = ExpectedFixtures.Load();
+        float worstText = 1, worstImage = 1;
+        foreach (var fx in expected.Texts)
+            worstText = Math.Min(worstText, Cosine(m.EmbedText(fx.Text), _models.Gpu.EmbedText(fx.Text)));
+        foreach (var fx in expected.Images)
+        {
+            using var bmp = SKBitmap.Decode(Path.Combine(TestPaths.Fixtures, fx.File));
+            worstImage = Math.Min(worstImage, Cosine(m.EmbedImage(bmp), _models.Gpu.EmbedImage(bmp)));
+        }
+        _out.WriteLine($"{_models.Gpu.Device} vs CPU: text cosine min {worstText:F5}, image cosine min {worstImage:F5}");
+        TestPaths.WriteNumbers("gpu-vs-cpu", new { device = _models.Gpu.Device.ToString(), text_min_cosine = worstText, image_min_cosine = worstImage });
+        Assert.True(worstText >= 0.999f, $"text on {_models.Gpu.Device} drifts from CPU: {worstText}");
+        Assert.True(worstImage >= 0.999f, $"images on {_models.Gpu.Device} drift from CPU: {worstImage}");
+    }
+
     [Fact]
     public void ConcurrentEmbedsAreStable()
     {
