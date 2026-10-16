@@ -18,6 +18,7 @@ activates licences, and is what CI packages.
 | `tauri.stub.conf.json` | merged with `--config`: static dev page instead of the web app |
 | `capabilities/default.json` | `core:default` only; no plugin is exposed to JavaScript |
 | `tools/stub-core/` | a stand-in core for testing the shell on its own |
+| `tools/smoke/` | the CI smoke harness: generated pictures, the model download, search on GPU and CPU, the real core through the handshake |
 | `dev-page/` | a page that calls every command and prints the answers |
 
 ## Build and test
@@ -139,12 +140,14 @@ to the shell's stderr (the terminal running `tauri dev`).
 
 ## CI
 
-`.github/workflows/build.yml`, two jobs on `windows-latest` and `macos-latest`:
+`.github/workflows/build.yml`. Nothing has run on a real Mac: GitHub's
+`macos-latest` runner (Apple silicon, 3 cores, macOS 26) is the only one.
 
-| Job | Does |
-|---|---|
-| `shell` | stub core, `cargo fmt --check`, `clippy -D warnings`, `cargo test` |
-| `bundle` | .NET 10 publish of the core, pnpm web build, `tauri build`, installers as artifacts |
+| Job | Runs on | Does |
+|---|---|---|
+| `shell` | Windows, macOS | stub core, `cargo fmt --check`, `clippy -D warnings`, `cargo test` |
+| `bundle` | Windows (`win-x64`), macOS (`osx-arm64`) | publishes the core into `resources/core` (prints files and MB), builds the web app, `tauri build`, uploads the installers. On macOS it then launches the built `.app` (below) |
+| `smoke` | macOS | the parts on a Mac without the shell (below). Numbers go to the job summary |
 
 Signing steps exist and run only when their secrets exist: `APPLE_CERTIFICATE`,
 `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`,
@@ -154,6 +157,57 @@ Signing steps exist and run only when their secrets exist: `APPLE_CERTIFICATE`,
 through `trusted-signing-cli`); `TAURI_SIGNING_PRIVATE_KEY`,
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (updater artifacts). Without them the
 builds are unsigned and `createUpdaterArtifacts` stays off.
+
+### How the Mac app is checked
+
+| Step | Job | Passes when |
+|---|---|---|
+| `tauri build` | bundle | an `.app` and an unsigned arm64 DMG exist; the DMG is the `tessera-desktop-osx-arm64` artifact |
+| launch the app | bundle | `Contents/MacOS/<exe>` with `TESSERA_DATA_DIR` set writes "core … ready on 127.0.0.1" to the shell log within 90 s; a screenshot is the `macos-app-launch` artifact |
+| kill the shell | bundle | after `kill` (SIGTERM) on the shell, the core exits by itself within 20 s and `core.pid` is gone: no orphans |
+| `dotnet test core` | smoke | every test passes |
+| `dotnet test search` | smoke | every test passes; `TESSERA_MODELS_DIR` points at the downloaded model, so the embedder tests compare against the PyTorch reference vectors too |
+| model download | smoke | `ModelStore` fetches every file in the manifest from the public release, no token, and the sha256s match. The folder is cached with `actions/cache`, keyed on the manifest's sha256s |
+| search | smoke | `tools/smoke search --require-gpu`: with `PreferGpu` true the device is not `Cpu` (CoreML); with true and false the red swatch beats green and blue for "a solid red square"; the two devices' vectors agree (cosine > 0.98) |
+| the core | smoke | `tools/smoke core`: the published `osx-arm64` core started with the contract section 1 environment and `TESSERA_WEB_ORIGIN=tauri://localhost`. 24 checks: one ready line within 30 s and nothing else on stdout; `core.pid`; `/health/*` 200 with and without the token; `/api/library` 401 without or with a wrong token and 200 with `?sessionKey=`; CORS preflight 204 for `tauri://localhost`; `POST /api/library/roots` 201 on 50 generated PNGs and JPEGs plus one HEIC made with `sips`; every picture scanned, thumbnailed (one `.webp` each) and embedded; `/api/search` puts `red.png` first; stdin closed, exit 0 within 20 s, `core.pid` gone; the library folder unchanged, byte for byte |
+| CoreML probe | smoke | not a gate. Tries candidate fixes for CoreML refusing the model (Not done, below) |
+
+Run the harness anywhere (`dotnet build src-tauri/tools/smoke -c Release -o <dir>`):
+
+```bash
+tessera-smoke images <dir> --count 50
+tessera-smoke model  <models-dir>
+tessera-smoke search <models-dir> --require-gpu
+tessera-smoke core   <core-exe> <library-dir> <new-data-dir> --models-from <models-dir> --embeddings
+```
+
+### macOS numbers
+
+Run [38872561745](https://github.com/arbaaz360/tessera-desktop/actions/runs/38872561745),
+2026-10-16, `macos-latest` (macOS 26, Apple silicon, 3 cores).
+
+| Measure | Value |
+|---|---|
+| core publish, `osx-arm64` | 354 files, 166 MB |
+| DMG, unsigned | `Tessera Desktop_0.1.0_aarch64.dmg`, 64.8 MiB |
+| `.app` | 174.3 MiB |
+| `tauri build` | 3 min 26 s to compile the shell, 28 s for the DMG |
+| app start to "core ready" in the shell log | 0.9 s |
+| core start to ready line (smoke) | 806 ms |
+| model download from the public release | 720 MB in 11.1 s, 65 MB/s |
+| `dotnet test core` | 95 of 95 |
+| `dotnet test search` | 37 of 38 (Not done, below) |
+| embedder against the PyTorch reference (CPU) | cosine 1.00000 for 256 px images and every sentence; 0.99677 and 0.99980 for resized inputs |
+| search device with `PreferGpu` true | `Cpu`: CoreML refused the model (Not done, below) |
+| CPU, images per second | 1.5 (batch 8, 640x480 inputs) |
+| CPU, text per sentence | 126 to 135 ms (median of 10) |
+| model load (sha256 check plus both sessions) | 6.0 to 6.8 s |
+| "a solid red square" | red 0.1612, blue 0.1174, green 0.1028, on both settings |
+| scan plus thumbnails, 51 pictures (one HEIC through `sips`) | 3.4 s, 15 per second, 0 failed |
+| embeddings inside the core, 51 pictures | 48.7 s including a 4.8 s model load, about 1.2 per second (CPU) |
+| `/api/search?q=a solid red square` | `red.png` first, score 0.160 |
+| stdin closed to exit | 343 ms, exit code 0 |
+| vector index, 200,000 vectors, top-100 search | 103.6 ms median |
 
 ## Not done
 
@@ -165,5 +219,37 @@ builds are unsigned and `createUpdaterArtifacts` stays off.
   is not implemented: a revoked key reverts to `free` at the next re-check.
 - The licence cache is not HMAC-protected (SRS 9.3 rule 5).
 - No deactivate command (SRS FR-47).
-- Not tried on macOS yet; the macOS paths and the entitlements come from the
-  plan, not from a run.
+- **CoreML does not load the model on macOS 26**, so a Mac embeds on the
+  CPU at about 1.5 images a second. Two causes, one behind the other, from
+  the CI probe ([run 38873830738](https://github.com/arbaaz360/tessera-desktop/actions/runs/38873830738)):
+
+  | Try | Core ML says |
+  |---|---|
+  | model as shipped (ONNX Runtime 1.24.4, and 1.31.0) | `Unable to parse ML Program: in operation /vision_model/embeddings/patch_embedding/Conv: Required param 'pad' is missing` |
+  | Conv padding spelled out (`tools/smoke/explicit_pads.py`) | `Failed to create MLModel … Input: pixel_values_fp16 has unbounded dimension which is not supported` |
+
+  The Conv says `auto_pad=VALID` with no `pads`; ONNX Runtime's CoreML
+  builder turns that into `pad_type="valid"` with no `pad` input, which this
+  Core ML rejects. Both models' batch dimension is the symbol `batch`, which
+  Core ML here will not take unbounded. Proposed fix, untested on a Mac:
+  `models/` writes `pads=[0,0,0,0]` instead of `auto_pad=VALID` in the export
+  (same output: identical vectors on Windows), and `search/` opens the
+  CoreML sessions with `SessionOptions.AddFreeDimensionOverrideByName("batch", n)`,
+  8 for vision (padding a short batch) and 1 for text. The smoke job's probe
+  now tests exactly that (`tools/smoke coreml`), but has not run: GitHub
+  stopped starting jobs on this account (billing, below).
+- `search/tests` `ModelStoreTests.EmbeddedManifestIsTheShippedOne` still
+  expects the model URLs under `arbaaz360/tessera-desktop`; the manifest
+  moved them to `arbaaz360/siglip2-base-onnx`. One string in `search/`.
+- The DMG is unsigned. A Mac that downloads it quarantines it, and Gatekeeper
+  refuses an unsigned app; testers can clear the flag with
+  `xattr -dr com.apple.quarantine "/Applications/Tessera Desktop.app"`.
+- When signing exists: Tauri signs the app's own binary, not the 354 files
+  in `Resources/resources/core`. Notarization needs every Mach-O in there
+  signed with the hardened runtime and `entitlements.plist` (JIT), so CI
+  will have to `codesign` the core's files before `tauri build`.
+- The window is 1280 points wide and the runner's screen 1024, so the
+  launch screenshot shows it cut off on the left. Real Macs are wider.
+- GitHub Actions stopped starting jobs on 2026-10-16 ("recent account
+  payments have failed or your spending limit needs to be increased"). A
+  macOS minute counts ten times against a private repository's allowance.
