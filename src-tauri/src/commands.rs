@@ -17,6 +17,36 @@ pub async fn core_info(sup: State<'_, Supervisor>) -> Result<CoreInfo, String> {
     sup.wait_ready(READY_TIMEOUT + Duration::from_secs(5)).await
 }
 
+/// Absolute paths of the pictures and videos the user picked (several at
+/// once), or `null` when they cancelled. The web app sends them to the core's
+/// `POST /api/import`, which indexes what is inside a library folder where it
+/// is and copies the rest into the Tessera folder.
+#[tauri::command]
+pub async fn pick_files<R: Runtime>(app: AppHandle<R>) -> Result<Option<Vec<String>>, String> {
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_title("Add pictures")
+            .add_filter("Pictures and videos", crate::import::MEDIA_EXTENSIONS)
+            .blocking_pick_files()
+    })
+    .await
+    .map_err(|e| format!("dialog: {e}"))?;
+    match picked {
+        None => Ok(None),
+        Some(files) => files
+            .into_iter()
+            .map(|f| {
+                f.simplified()
+                    .into_path()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .map_err(|e| format!("dialog: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|paths| if paths.is_empty() { None } else { Some(paths) }),
+    }
+}
+
 /// An absolute path, or `null` when the user cancelled.
 #[tauri::command]
 pub async fn pick_folder<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {

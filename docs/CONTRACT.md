@@ -27,6 +27,7 @@ The shell starts the core executable with these environment variables.
 | `TESSERA_WEB_ORIGIN` | yes | the one origin CORS allows: `tauri://localhost` on macOS, `http://tauri.localhost` on Windows |
 | `TESSERA_PORT` | no | unset or `0`: the core picks a free loopback port |
 | `TESSERA_DEV` | no | `1` also allows the origin `http://localhost:5173` (Vite dev) |
+| `TESSERA_FOLDER` | no | absolute path: where the Tessera folder goes until one is chosen in Settings, instead of `Pictures/Tessera`. Tests and dev runs set it so nothing is copied into a real Pictures folder (added 2026-10-18) |
 
 Rules:
 
@@ -131,6 +132,69 @@ time (`mtime`); `pending` is what the header backfill has not read yet.
 | `POST /api/library/roots/{id}/scan` | `202 {"runId": N}`; `409` if a scan of that root is running |
 | `GET /api/library/duplicates?limit=200` | `[{"contentId": N, "sha256": "…", "byteSize": N, "locations": [{"id": N, "rootId": N, "relPath": "…"}]}]` — contents with two or more live locations |
 
+Removing a root (added 2026-10-18) also deletes the albums its folders made
+(`origin: "folder"` on `/api/albums`) that no remaining root holds and that
+have no live picture. A person's album (`origin: "manual"`: made, named,
+renamed, given a description or a cover by a person) is never deleted, nor is
+one with a live picture. An album's `assetCount` counts live pictures only (a
+location neither trashed nor gone); membership itself is kept, so a folder
+that returns brings its pictures back into a person's albums.
+
+### Imports (added 2026-10-18)
+
+Adding pictures by drop, file pick or folder. **The Tessera folder** is the
+one place the app writes: `Pictures/Tessera` on Windows (the user's Pictures
+known folder) and `~/Pictures/Tessera` on macOS, unless `TESSERA_FOLDER` or
+Settings says otherwise. It is made at first use and registered as a root
+with `appOwned: true`; its folders are not albums. It may sit inside a
+person's root, which then leaves it to its own root (nothing is indexed
+twice); nothing may be added as a root inside it.
+
+| Route | Answer |
+|---|---|
+| `POST /api/import` `{"paths": ["…"], "urls": ["https://…"], "albumId": "5"}` (either list may be absent, not both) | `202` the job, every item `pending`; `400` nothing to import; `404` unknown album |
+| `GET /api/import/{id}` | `200` the job as it stands; after a restart the counts survive and `items` is `[]`; `404` unknown |
+| `POST /api/import/upload?name=beach.jpg&albumId=5`, body the file's bytes (`application/octet-stream`) | `200` a finished job of one item. For a drop the webview hands over as data, not a path |
+
+What each item becomes, in order:
+
+1. A folder is indexed where it is, never copied: inside a root it is
+   rescanned, otherwise it becomes a root. Its live pictures join the album.
+   A folder holding a root is skipped with the reason.
+2. A file inside a root is indexed now, where it is.
+3. A file outside every root whose bytes (sha256) the library already holds
+   is not copied; the picture there is used.
+4. Any other file is copied to `<Tessera folder>/<album name or "Unsorted">/<original name>`:
+   written to a temporary name ending `.tessera-partial`, flushed, read back
+   and hashed, then renamed. A name taken by other bytes gets a number
+   (`beach (2).jpg`). The source is only ever read. A failed copy leaves no file.
+5. A link is fetched once (§9) and treated as 3 and 4; so are uploaded bytes.
+
+A picture that was in the trash comes back out when added again. Images and
+videos alike; anything else is skipped as "not a picture or video".
+
+```json
+{"id": 7, "albumId": "5", "state": "running", "startedAt": "…", "finishedAt": null,
+ "total": 3, "done": 1,
+ "counts": {"added": 0, "already": 1, "copied": 0, "skipped": 0, "folders": 0},
+ "items": [{"source": "C:\\Users\\me\\Desktop\\a.jpg", "kind": "file", "outcome": "already",
+            "reason": null, "assetId": "123", "path": "…", "rootId": 2, "pictures": null}]}
+```
+
+`state` is `running`, `done` or `cancelled` (the core stopped). `kind` is
+`file`, `folder`, `url` or `upload`; `outcome` is `pending`, `added` (new,
+indexed where it is), `already` (the bytes were in the library), `copied`
+(into the Tessera folder) or `skipped` (with `reason`). Folder items count in
+`folders`, not in `added`/`already`, and carry `pictures`. Null fields may be
+left out.
+
+`GET /api/library` adds `"imports": {"running": N, "last": <job without items>}`
+and `"tesseraFolder": {"path": "C:/Users/me/Pictures/Tessera", "rootId": N or absent before first use}`;
+each root adds `"appOwned": true|false`. `GET /api/settings` adds
+`"tesseraFolder": "…"`; `PUT /api/settings {"tesseraFolder": "…"}` moves it:
+the next copies go there, nothing copied before moves (`400` not absolute,
+`409` a library folder already, or one that would hold one).
+
 ### Search
 
 | Route | Answer |
@@ -163,10 +227,17 @@ web app shows the unlock prompt on that flag. Setting the state to
 |---|---|
 | `core_info()` | `{"baseUrl": "http://127.0.0.1:N", "token": "…"}` |
 | `pick_folder()` | an absolute path, or `null` |
+| `pick_files()` | absolute paths of the pictures and videos picked (several at once), or `null` (added 2026-10-18) |
 | `licence_get()` | `{"state": "free" or "licensed", "keyMasked": "XXXX-…-1234" or null, "checkedAt": "…" or null}` |
 | `licence_activate(key)` | `{"state": "…", "error": null or "invalid" or "offline"}` — verifies with Gumroad, stores the key in the OS keychain, then `PUT /api/licence` on the core |
 | `open_external(url)` | opens the system browser |
 | `app_version()` | `"1.0.0"` |
+
+Drag and drop (added 2026-10-18): Tauri 2's drag-drop handler is on for the
+main window. Files dragged in from File Explorer or Finder reach the web app
+as the `tauri://drag-enter|over|drop|leave` events with their paths and the
+pointer position (physical pixels on Windows, the view's points on macOS);
+the web app picks the target under the pointer and calls `POST /api/import`.
 
 The web app detects Tauri by `window.__TAURI_INTERNALS__`. Outside Tauri
 (Vite dev, tests) it reads `VITE_CORE_URL` and `VITE_CORE_TOKEN` from
@@ -244,9 +315,15 @@ certificates exist.
 ## 9. Product rules every part obeys
 
 - **Never write inside a library root. Never delete a file.** Trash is
-  `trashed_at`; `POST /api/trash/empty` answers 403.
+  `trashed_at`; `POST /api/trash/empty` answers 403. The one exception is
+  the Tessera folder (§4, Imports), which the app owns: it copies pictures
+  into it, and removes only its own `.tessera-partial` temporary files there.
 - **No network** except: model download (the URLs in the manifest), Gumroad
-  licence verification (shell), the update feed (shell).
+  licence verification (shell), the update feed (shell), and (added
+  2026-10-18, authorized by the coordinator) a link a person drags onto the
+  app: the core fetches that one http(s) URL once, as a user-initiated
+  download into the Tessera folder, and never again on its own. Nothing else
+  is fetched, and nothing about the library is sent.
 - **Numbers, not states.** Every status answer reports counts.
 - One fact, one place: a thumbnail's path is derived from the hash, never
   stored; a file's identity is its sha256, never its path.
