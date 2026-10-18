@@ -19,6 +19,7 @@ import { AssetPage } from '@/features/viewer/AssetPage';
 import { LibraryPage } from '@/features/library/LibraryPage';
 import { SettingsPage } from '@/features/settings/SettingsPage';
 import { OnboardingPage } from '@/features/onboarding/OnboardingPage';
+import { welcomeSkipped } from '@/features/onboarding/welcome';
 
 /**
  * Routing.
@@ -28,11 +29,11 @@ import { OnboardingPage } from '@/features/onboarding/OnboardingPage';
  * is no codegen step to explain.
  *
  * There is no login. The boot token is applied before the router mounts (see
- * AppBoot). What gates the app instead is ONBOARDING: a library with no roots
- * has nothing to show, so every page under the shell redirects to /welcome
- * until a folder has been added. The check reads the library through the
- * same query cache the Library page fills, so it is one request per session,
- * not one per navigation.
+ * AppBoot). A library with no roots opens on /welcome, ONCE: the welcome page
+ * can be skipped, and pictures can be dropped or picked onto the empty grid,
+ * so a folder is not the only way in (`features/onboarding/welcome.ts`). The
+ * check reads the library through the same query cache the Library page
+ * fills, so it is one request per session, not one per navigation.
  */
 
 const rootRoute = createRootRoute({
@@ -61,7 +62,7 @@ const appRoute = createRoute({
       // bouncing a person with a library to the welcome screen.
       return;
     }
-    if (library.roots.length === 0) {
+    if (library.roots.length === 0 && !welcomeSkipped()) {
       throw redirect({ to: '/welcome' });
     }
   },

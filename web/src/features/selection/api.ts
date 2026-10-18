@@ -25,6 +25,20 @@ export function useBulkFavorite() {
   });
 }
 
+/**
+ * What a change of album membership changes: the album list (counts,
+ * covers) AND every timeline, because an album's grid is a timeline query
+ * keyed by `albumId`. Invalidating only the list once left an album opened
+ * while empty showing "This album is empty" under "10 items" for a minute
+ * after ten pictures were added (Windows install, 2026-10-18).
+ */
+export function invalidateAfterAlbumChange(client: QueryClient): Promise<unknown> {
+  return Promise.all([
+    client.invalidateQueries({ queryKey: qk.albums.all }),
+    client.invalidateQueries({ queryKey: qk.timeline.all }),
+  ]);
+}
+
 export function useBulkAddToAlbum() {
   const client = useQueryClient();
   return useMutation({
@@ -33,9 +47,20 @@ export function useBulkAddToAlbum() {
         method: 'PUT',
         body: JSON.stringify({ ids }),
       }),
-    // Album asset counts (and possibly covers) just changed; the cached album
-    // list renders both.
-    onSuccess: () => client.invalidateQueries({ queryKey: qk.albums.all }),
+    onSuccess: () => invalidateAfterAlbumChange(client),
+  });
+}
+
+/** Take pictures out of an album. The pictures stay in the library. */
+export function useBulkRemoveFromAlbum() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ albumId, ids }: { albumId: string; ids: string[] }) =>
+      apiJson<BulkIdResponseDto[]>(`/api/albums/${encodeURIComponent(albumId)}/assets`, {
+        method: 'DELETE',
+        body: JSON.stringify({ ids }),
+      }),
+    onSuccess: () => invalidateAfterAlbumChange(client),
   });
 }
 

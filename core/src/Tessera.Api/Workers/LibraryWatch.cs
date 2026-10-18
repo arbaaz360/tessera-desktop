@@ -117,7 +117,7 @@ public sealed class LibraryWatch(
 
         if (parentRow is null && known.Count == 0)
         {
-            var names = ChildFolders(parentAbs, root.Exclude);
+            var names = ChildFolders(parentAbs, root.Exclude, root.Nested);
             var news = await folders.BootstrapAsync(root.RootId, root.Parent, names, ct);
             await folders.ObservedAsync(root.RootId, "", parentMtime, names.Count, changed: false, ct);
             log.WatchBootstrapped(root.Label, names.Count, news);
@@ -129,7 +129,7 @@ public sealed class LibraryWatch(
             return;
         }
 
-        var current = ChildFolders(parentAbs, root.Exclude);
+        var current = ChildFolders(parentAbs, root.Exclude, root.Nested);
         var currentSet = current.Select(n => FolderRepository.Join(root.Parent, n)).ToHashSet(StringComparer.Ordinal);
         foreach (var name in current)
         {
@@ -245,12 +245,18 @@ public sealed class LibraryWatch(
         return new DateTimeOffset(ticks - ticks % TimeSpan.TicksPerMillisecond, TimeSpan.Zero);
     }
 
-    private static List<string> ChildFolders(string parentAbs, string[] exclude)
+    /// <param name="nested">Roots inside this one (the app's own folder): their own root minds them.</param>
+    private static List<string> ChildFolders(string parentAbs, string[] exclude, string[] nested)
     {
         var names = new List<string>();
         foreach (var dir in Directory.EnumerateDirectories(parentAbs, "*", Shallow))
         {
             if (exclude.Any(x => dir.Contains(x, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            if (nested.Any(n => string.Equals(PathRules.Canonical(dir), n, StringComparison.OrdinalIgnoreCase)))
             {
                 continue;
             }

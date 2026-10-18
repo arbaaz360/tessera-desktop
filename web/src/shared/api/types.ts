@@ -32,7 +32,10 @@ export interface AlbumDto {
   albumThumbnailAssetId: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Live pictures only: a picture whose folder left the library is not counted. */
   assetCount: number;
+  /** "folder": made by the folder rule, deleted with its folder; "manual": a person's. */
+  origin?: 'manual' | 'folder';
   shared: boolean;
   hasSharedLink: boolean;
   isActivityEnabled: boolean;
@@ -116,6 +119,8 @@ export interface LibraryRoot {
   path: string;
   label: string;
   enabled: boolean;
+  /** The Tessera folder (or an earlier one): the one place the app copies pictures into. */
+  appOwned?: boolean;
   counts: RootCounts;
   lastScan: LastScan | null;
   scanning: boolean;
@@ -137,6 +142,53 @@ export interface Library {
   embeddings: { pending: number; done: number; model: string; ready: boolean };
   licence: Licence;
   watch: { running: boolean; lastTick: string | null };
+  /** Drops, picks and folder adds: how many are under way, and the newest. */
+  imports?: { running: number; last?: ImportJob };
+  /** Where copies from outside the library go; rootId is absent until first use. */
+  tesseraFolder?: { path: string; rootId?: number };
+}
+
+// ------------------------------------------------------------ imports
+
+export type ImportOutcome = 'pending' | 'added' | 'already' | 'copied' | 'skipped';
+export type ImportKind = 'file' | 'folder' | 'url' | 'upload';
+
+export interface ImportCounts {
+  /** New pictures, indexed where they are (inside a library folder). */
+  added: number;
+  /** The same bytes were in the library already; nothing copied. */
+  already: number;
+  /** Copied into the Tessera folder from outside the library. */
+  copied: number;
+  /** Not added; each item says why. */
+  skipped: number;
+  /** Folders indexed in place. */
+  folders: number;
+}
+
+export interface ImportItem {
+  source: string;
+  kind: ImportKind;
+  outcome: ImportOutcome;
+  reason?: string;
+  assetId?: string;
+  path?: string;
+  rootId?: number;
+  /** For a folder: its pictures after the scan. */
+  pictures?: number;
+}
+
+/** `POST /api/import`, `GET /api/import/{id}`, `POST /api/import/upload`. */
+export interface ImportJob {
+  id: number;
+  albumId?: string;
+  state: 'running' | 'done' | 'cancelled';
+  startedAt: string;
+  finishedAt?: string;
+  total: number;
+  done: number;
+  counts: ImportCounts;
+  items: ImportItem[];
 }
 
 export interface DuplicateLocation {
@@ -205,6 +257,8 @@ export interface Settings {
   embedOnBattery: boolean;
   version: string;
   dataDir: string;
+  /** The Tessera folder: where pictures dropped from outside the library are copied. */
+  tesseraFolder?: string;
 }
 
-export type SettingsPatch = Partial<Pick<Settings, 'thumbnailConcurrency' | 'embedOnBattery'>>;
+export type SettingsPatch = Partial<Pick<Settings, 'thumbnailConcurrency' | 'embedOnBattery' | 'tesseraFolder'>>;

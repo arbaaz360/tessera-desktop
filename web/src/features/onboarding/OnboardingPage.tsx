@@ -1,4 +1,4 @@
-import { useCallback, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useQueryClient } from '@tanstack/react-query';
 import { isTauri } from '@/shared/api/core';
@@ -7,6 +7,9 @@ import { apiErrorMessage } from '@/shared/api/tessera';
 import { qk } from '@/shared/api/queries';
 import { useAddRoot, useLibrary, useScanRoot } from '@/features/library/api';
 import { SearchModelProgress } from '@/features/library/SearchModelProgress';
+import { AddButtons } from '@/features/import/AddButtons';
+import { useImportsIfMounted } from '@/features/import/ImportContext';
+import { skipWelcome } from './welcome';
 
 /**
  * First run.
@@ -67,6 +70,22 @@ export function OnboardingPage() {
   };
 
   const openPictures = useCallback(() => void navigate({ to: '/photos' }), [navigate]);
+
+  // Pictures dropped or picked here: once an import has added anything, the
+  // grid is the place to see it.
+  const imports = useImportsIfMounted();
+  const addedSomething = (imports?.entries ?? []).some(
+    (entry) =>
+      entry.job &&
+      entry.job.state !== 'running' &&
+      entry.job.counts.added + entry.job.counts.copied + entry.job.counts.already + entry.job.counts.folders > 0,
+  );
+  useEffect(() => {
+    if (step === 'pick' && addedSomething) {
+      skipWelcome();
+      void navigate({ to: '/photos' });
+    }
+  }, [step, addedSomething, navigate]);
 
   return (
     <div className="grid h-full place-items-center overflow-y-auto bg-ground px-6 py-10 text-ink">
@@ -138,6 +157,26 @@ export function OnboardingPage() {
                 {error}
               </p>
             )}
+
+            <div className="mt-5 border-t border-line-soft pt-4">
+              <p className="text-sm text-ink-muted">
+                Or start with a few pictures: drag them onto this window, or pick them. Those already
+                in a folder you add later are not copied twice.
+              </p>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {imports && <AddButtons target={null} variant="empty" />}
+                <button
+                  type="button"
+                  onClick={() => {
+                    skipWelcome();
+                    openPictures();
+                  }}
+                  className="rounded-md px-3 py-2 text-sm text-ink-faint underline-offset-2 hover:text-ink hover:underline"
+                >
+                  Skip for now
+                </button>
+              </div>
+            </div>
 
             {hasRoots && (
               <p className="mt-4 text-sm text-ink-faint">

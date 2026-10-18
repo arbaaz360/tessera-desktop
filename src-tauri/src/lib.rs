@@ -4,6 +4,7 @@
 pub mod applog;
 pub mod commands;
 pub mod core;
+pub mod import;
 pub mod licence;
 pub mod paths;
 pub mod updater;
@@ -33,6 +34,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::core_info,
             commands::pick_folder,
+            commands::pick_files,
             commands::open_external,
             commands::app_version,
             commands::licence_get,
@@ -40,6 +42,21 @@ pub fn run() {
             commands::core_restart,
             commands::open_logs,
         ])
+        // Drops reach the web app as `tauri://drag-*` events with their paths;
+        // it sends them to the core. Logged here in counts (src/import.rs).
+        .on_window_event(|_window, event| {
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                let s = import::summarize(paths);
+                log::info!(
+                    "drop: {} paths: {} files ({} pictures or videos), {} folders, {} not found",
+                    paths.len(),
+                    s.files,
+                    s.media,
+                    s.folders,
+                    s.missing
+                );
+            }
+        })
         .setup(|app| setup(app.handle().clone()))
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

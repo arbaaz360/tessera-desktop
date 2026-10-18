@@ -14,6 +14,9 @@ public sealed record RootSummary
     public long Files { get; init; }
     public long Contents { get; init; }
     public long Trashed { get; init; }
+
+    /// <summary>The Tessera folder (or an earlier one): made by the app, the one place it writes.</summary>
+    public bool AppOwned { get; init; }
 }
 
 /// <summary>One live copy of a duplicated content.</summary>
@@ -37,6 +40,7 @@ public sealed class LibraryRepository(Db db)
         return (await conn.QueryAsync<RootSummary>(new CommandDefinition(
             """
             SELECT r.root_id AS RootId, r.label AS Label, r.abs_path AS AbsPath, r.enabled AS Enabled,
+                   r.app_owned AS AppOwned,
                    (SELECT count(*) FROM location l
                      WHERE l.root_id = r.root_id AND l.gone_at IS NULL AND l.trashed_at IS NULL) AS Files,
                    (SELECT count(DISTINCT l.content_id) FROM location l
@@ -53,46 +57,70 @@ public sealed class LibraryRepository(Db db)
     public async Task<ScanRoot?> RootAsync(long rootId, CancellationToken ct)
     {
         await using var conn = await db.OpenAsync(ct);
-        var row = await conn.QuerySingleOrDefaultAsync<(long RootId, long AccountId, string Label, string AbsPath, bool Enabled, string Exclude, string? AlbumFolder)?>(
-            new CommandDefinition(
-                "SELECT root_id, account_id, label, abs_path, enabled, exclude, album_folder FROM scan_root WHERE root_id = @RootId",
-                new { RootId = rootId }, cancellationToken: ct));
-        return row is null ? null : new ScanRoot
-        {
-            RootId = row.Value.RootId,
-            AccountId = row.Value.AccountId,
-            Label = row.Value.Label,
-            AbsPath = row.Value.AbsPath,
-            Enabled = row.Value.Enabled,
-            Exclude = FolderRepository.ParseExclude(row.Value.Exclude),
-            AlbumFolder = row.Value.AlbumFolder,
-        };
+        var all = await AllRootsAsync(ct);
+        return all.FirstOrDefault(r => r.RootId == rootId);
     }
+
+    /// <summary>Every root, with the roots nested in each: which one holds a path.</summary>
+    public async Task<IReadOnlyList<ScanRoot>> AllRootsAsync(CancellationToken ct)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        var rows = (await conn.QueryAsync<(long RootId, long AccountId, string Label, string AbsPath, bool Enabled, string Exclude, string? AlbumFolder, bool AppOwned)>(
+            new CommandDefinition(
+                "SELECT root_id, account_id, label, abs_path, enabled, exclude, album_folder, app_owned FROM scan_root ORDER BY root_id",
+                cancellationToken: ct))).ToList();
+        var paths = rows.Select(r => r.AbsPath).ToList();
+        return rows.Select(r => new ScanRoot
+        {
+            RootId = r.RootId,
+            AccountId = r.AccountId,
+            Label = r.Label,
+            AbsPath = r.AbsPath,
+            Enabled = r.Enabled,
+            Exclude = FolderRepository.ParseExclude(r.Exclude),
+            AlbumFolder = r.AlbumFolder,
+            AppOwned = r.AppOwned,
+            Nested = NestedIn(r.AbsPath, paths),
+        }).ToList();
+    }
+
+    /// <summary>The roots strictly inside <paramref name="rootPath"/>, canonical.</summary>
+    public static string[] NestedIn(string rootPath, IEnumerable<string> allRoots) =>
+        allRoots.Where(other => PathRules.RelativeTo(rootPath, other) is { Length: > 0 }).ToArray();
 
     /// <summary>
     /// Whether a canonical path may become a root: not one already, not under
     /// one, not over one. Two roots over the same files would index them
     /// twice - which once registered 55,370 files twice on the HomeLab.
     /// </summary>
-    public async Task<(RootConflict Conflict, string? Other)> ConflictAsync(string canonicalPath, CancellationToken ct)
+    /// <remarks>
+    /// One nesting is allowed, because it cannot index anything twice: the
+    /// app's own folder (Pictures/Tessera) inside a person's root, whichever
+    /// came first. The outer root's scan and watch leave it alone
+    /// (<see cref="ScanRoot.Nested"/>). A folder inside the app's folder is
+    /// still refused: it is indexed already.
+    /// </remarks>
+    /// <param name="appFolder">True when the path is to become the app's own folder.</param>
+    public async Task<(RootConflict Conflict, string? Other)> ConflictAsync(string canonicalPath, CancellationToken ct, bool appFolder = false)
     {
         await using var conn = await db.OpenAsync(ct);
-        var existing = await conn.QueryAsync<string>(new CommandDefinition(
-            "SELECT abs_path FROM scan_root", cancellationToken: ct));
+        var existing = await conn.QueryAsync<(string AbsPath, bool AppOwned)>(new CommandDefinition(
+            "SELECT abs_path, app_owned FROM scan_root", cancellationToken: ct));
 
-        foreach (var other in existing)
+        foreach (var (other, otherIsApp) in existing)
         {
             if (string.Equals(other, canonicalPath, StringComparison.OrdinalIgnoreCase))
             {
                 return (RootConflict.AlreadyARoot, other);
             }
 
-            if (PathRules.RelativeTo(other, canonicalPath) is not null)
+            // The app's folder may sit inside a person's root, not the reverse.
+            if (PathRules.RelativeTo(other, canonicalPath) is not null && !(appFolder && !otherIsApp))
             {
                 return (RootConflict.InsideARoot, other);
             }
 
-            if (PathRules.RelativeTo(canonicalPath, other) is not null)
+            if (PathRules.RelativeTo(canonicalPath, other) is not null && !(otherIsApp && !appFolder))
             {
                 return (RootConflict.ContainsARoot, other);
             }
@@ -101,24 +129,45 @@ public sealed class LibraryRepository(Db db)
         return (RootConflict.None, null);
     }
 
-    public async Task<long> AddRootAsync(long accountId, string canonicalPath, string label, CancellationToken ct)
+    public Task<long> AddRootAsync(long accountId, string canonicalPath, string label, CancellationToken ct) =>
+        AddRootAsync(accountId, canonicalPath, label, appOwned: false, ct);
+
+    /// <param name="appOwned">
+    /// The app's own folder: marked, and its folders are not albums. What is
+    /// copied in is filed into albums by the import itself; a folder named
+    /// after an album must not become a second album.
+    /// </param>
+    public async Task<long> AddRootAsync(long accountId, string canonicalPath, string label, bool appOwned, CancellationToken ct)
     {
         await using var conn = await db.OpenWriteAsync(ct);
         return await conn.ExecuteScalarAsync<long>(new CommandDefinition(
             """
-            INSERT INTO scan_root (account_id, label, abs_path, album_folder)
-            VALUES (@AccountId, @Label, @AbsPath, '')
+            INSERT INTO scan_root (account_id, label, abs_path, album_folder, app_owned)
+            VALUES (@AccountId, @Label, @AbsPath, CASE WHEN @AppOwned THEN NULL ELSE '' END, @AppOwned)
             RETURNING root_id
             """,
-            new { AccountId = accountId, Label = label, AbsPath = canonicalPath }, cancellationToken: ct));
+            new { AccountId = accountId, Label = label, AbsPath = canonicalPath, AppOwned = appOwned }, cancellationToken: ct));
+    }
+
+    /// <summary>Mark an existing root as the app's own folder; its folders stop being albums.</summary>
+    public async Task MarkAppOwnedAsync(long rootId, CancellationToken ct)
+    {
+        await using var conn = await db.OpenWriteAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition(
+            "UPDATE scan_root SET app_owned = 1, album_folder = NULL WHERE root_id = @RootId",
+            new { RootId = rootId }, cancellationToken: ct));
     }
 
     /// <summary>
     /// Forget a root. Its location rows go (and with them its timeline rows,
-    /// by trigger); content rows stay, so albums keep their members. Nothing
+    /// by trigger); content rows stay, so a person's albums keep their
+    /// members and get them back if the folder returns. The folder albums the
+    /// root leaves behind with no live picture go too
+    /// (<see cref="AlbumRepository.DeleteLeftoverFolderAlbumsSql"/>). Nothing
     /// on disk is touched.
     /// </summary>
-    public async Task<bool> RemoveRootAsync(long accountId, long rootId, CancellationToken ct)
+    /// <returns>Null when there is no such root; else how many folder albums went with it.</returns>
+    public async Task<int?> RemoveRootAsync(long accountId, long rootId, CancellationToken ct)
     {
         await using var conn = await db.OpenWriteAsync(ct);
         await using var tx = conn.BeginTransaction(deferred: false);
@@ -131,9 +180,32 @@ public sealed class LibraryRepository(Db db)
         var removed = await conn.ExecuteAsync(new CommandDefinition(
             "DELETE FROM scan_root WHERE root_id = @RootId AND account_id = @AccountId",
             new { RootId = rootId, AccountId = accountId }, tx, cancellationToken: ct));
+        if (removed == 0)
+        {
+            await tx.RollbackAsync(ct);
+            return null;
+        }
+
+        // The root's album_root links went with it (cascade): what no root
+        // holds any more and nothing live fills is a leftover.
+        var albums = await conn.ExecuteAsync(new CommandDefinition(
+            AlbumRepository.DeleteLeftoverFolderAlbumsSql, transaction: tx, cancellationToken: ct));
 
         await tx.CommitAsync(ct);
-        return removed > 0;
+        return albums;
+    }
+
+    /// <summary>Distinct live pictures under one folder of a root, or the whole root.</summary>
+    public async Task<long> LiveContentsUnderAsync(long rootId, string? folder, CancellationToken ct)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        return await conn.ExecuteScalarAsync<long>(new CommandDefinition(
+            """
+            SELECT count(DISTINCT content_id) FROM location
+             WHERE root_id = @RootId AND gone_at IS NULL AND trashed_at IS NULL
+               AND (@Folder IS NULL OR substr(rel_path, 1, length(@Folder) + 1) = @Folder || '/')
+            """,
+            new { RootId = rootId, Folder = folder }, cancellationToken: ct));
     }
 
     /// <summary>Contents with two or more live locations, most copies first.</summary>

@@ -652,6 +652,8 @@ public static class ImmichCompatEndpoints
         createdAt = Api.Iso(a.CreatedAt),
         updatedAt = Api.Iso(a.UpdatedAt),
         assetCount = a.ItemCount,
+        // Additive: "folder" albums are the folder rule's and go with their folder.
+        origin = a.Origin,
         shared = false,
         hasSharedLink = false,
         isActivityEnabled = false,

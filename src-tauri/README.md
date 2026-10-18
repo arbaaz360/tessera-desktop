@@ -13,6 +13,7 @@ activates licences, and is what CI packages.
 | `src/updater.rs` | update check at launch, inactive until a real public key is configured |
 | `src/applog.rs` | the shell log, with the core's stderr interleaved |
 | `src/paths.rs` | data dir, logs, core executable |
+| `src/import.rs` | the file picker's filter (the scanner's extensions) and the drop log line |
 | `src/error-page.js` | what the window shows when the shell gives up on the core |
 | `tauri.conf.json` | the app config from the contract |
 | `tauri.stub.conf.json` | merged with `--config`: static dev page instead of the web app |
@@ -83,6 +84,53 @@ pnpm dlx @tauri-apps/cli@2 build    # web build, then NSIS + MSI (Windows) or DM
 ```
 
 Installers land in `src-tauri/target/release/bundle/`.
+
+## Adding pictures
+
+| Piece | What it does |
+|---|---|
+| drag and drop | Tauri 2's handler, on for the main window (`dragDropEnabled`). Files dragged from File Explorer or Finder reach the web app as `tauri://drag-enter/over/drop/leave` with their paths and the pointer position; the web app picks the target (an album or the library) and calls the core's `POST /api/import` |
+| `pick_files()` | the dialog plugin's file picker, several at once, filtered to pictures and videos; absolute paths or `null` |
+| log | one line per drop, in counts: `drop: 5 paths: 4 files (4 pictures or videos), 1 folders, 0 not found` |
+
+Positions: on Windows Tauri reports client pixels (physical); on macOS it
+reports the view's points under the same "physical" label. The web app
+converts per platform (`web/src/features/import/dropTarget.ts`).
+
+### Run a second copy beside the installed app
+
+The single-instance plugin keys on the identifier, and WebView2 keeps its
+profile under it, so a test build with another identifier runs beside the
+installed app without touching it. Point the data dir and the Tessera folder
+at a scratch folder:
+
+```bash
+pnpm dlx @tauri-apps/cli@2 build --no-bundle --config '{"identifier":"com.novabyteworks.tesseradesktop.dev"}'
+TESSERA_DATA_DIR=/tmp/td-data TESSERA_FOLDER=/tmp/td-Tessera ./target/release/tessera-desktop.exe
+```
+
+`TESSERA_FOLDER` passes through to the core (the shell does not clear its
+environment); without it a copy dropped from outside lands in the real
+`Pictures/Tessera`.
+
+### Checked in a running copy (Windows, 2026-10-18)
+
+A release build with the identifier above, beside the installed app (which
+kept running, untouched), a scratch data dir, search off. The drops were
+Tauri's own `tauri://drag-*` events emitted inside the window (paths and a
+position, the payload wry hands over), so everything from the event on is
+the shipped code: the web app, the shell's commands, the core.
+
+| Check | Result |
+|---|---|
+| drag over the album card "Trips", then over empty space, then away | overlay "Drop to add 7 items to “Trips”", the card outlined; then "…to your library"; then gone |
+| drop of 5 loose files, a folder, and a file already in a library folder, on "Trips" | 5 copied to `Tessera/Trips/` (originals in place), the folder became a library folder in place (2 pictures, nothing copied), the known file "already"; "Trips" 0 → 8 items |
+| a new file onto the card | toast "Adding 1 item…", then "1 copied in"; the card's count 8 → 9 within 1.5 s; the toast gone after about 8 s |
+| a known file and a missing path onto the album page | "1 already there · 1 skipped", "missing.png: not found"; that toast stays until dismissed |
+| a file onto the grid | copied to `Tessera/Unsorted/`, no album |
+| the album page | one search box (the top bar's, scoped to the album), Add pictures and Add folder |
+| removing the library folder | its folder album "Inside" went; "Trips" stayed, 9 → 8 live (the picture from that folder no longer counts); core log: `Root 1 removed; 1 folder albums it left with no live picture went with it` |
+| window closed | core stopped, exit code 0, `core.pid` gone |
 
 ## What the core gets
 
@@ -250,6 +298,14 @@ built on both devices; stdin closed to exit 368 ms.
 
 ## Not done
 
+- **A drag by hand from File Explorer** was not made here: desktop control
+  of File Explorer was declined for this session. The path from Tauri's
+  drag-drop events onward was run in a real window (above); the step before
+  it, Windows' OLE drop turned into those events by wry, and the shell's
+  `drop:` log line, have not run on this machine.
+- **Add pictures in a window** opens the system dialog; it was built and
+  type-checked, not clicked here (no desktop control).
+- **A drag from a browser** in the Tauri window: see `web/README.md`.
 - Certificates and the updater key do not exist; `plugins.updater.pubkey`
   and the endpoint are placeholders and the update check is skipped.
 - The Gumroad product id is a placeholder, so every key is `invalid` until

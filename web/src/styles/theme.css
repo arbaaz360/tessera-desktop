@@ -137,6 +137,20 @@
     color: var(--color-ink-inverse);
   }
 
+  /* The album a drag from outside is over (DropZone sets the attribute):
+     the drop will add to this one. Inset on the album page, which fills the
+     window; around the card everywhere else. */
+  [data-drop-hover] {
+    outline: 3px solid var(--color-accent);
+    outline-offset: 3px;
+    border-radius: var(--radius-md);
+    background-color: color-mix(in srgb, var(--color-accent) 8%, transparent);
+  }
+  [data-drop-hover][data-drop-page] {
+    outline-offset: -3px;
+    border-radius: 0;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     *,
     *::before,

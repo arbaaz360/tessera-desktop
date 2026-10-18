@@ -29,6 +29,7 @@ public sealed class SettingsRepository(Db db)
     private const string LicenceKey = "licence.state";
     private const string SearchKey = "search.enabled";
     private const string BatteryKey = "embed.onBattery";
+    private const string ImportFolderKey = "import.folder";
 
     public async Task<AppSettings> ReadAsync(CancellationToken ct)
     {
@@ -60,6 +61,16 @@ public sealed class SettingsRepository(Db db)
     public Task SetSearchEnabledAsync(bool enabled, CancellationToken ct) => SetAsync(SearchKey, enabled ? "true" : "false", ct);
 
     public Task SetEmbedOnBatteryAsync(bool on, CancellationToken ct) => SetAsync(BatteryKey, on ? "true" : "false", ct);
+
+    /// <summary>Where the Tessera folder is, once decided; null until then.</summary>
+    public async Task<string?> ImportFolderAsync(CancellationToken ct)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        return await conn.ExecuteScalarAsync<string?>(new CommandDefinition(
+            "SELECT value FROM setting WHERE key = @Key", new { Key = ImportFolderKey }, cancellationToken: ct));
+    }
+
+    public Task SetImportFolderAsync(string canonicalPath, CancellationToken ct) => SetAsync(ImportFolderKey, canonicalPath, ct);
 
     public async Task SetThumbnailConcurrencyAsync(int concurrency, CancellationToken ct)
     {

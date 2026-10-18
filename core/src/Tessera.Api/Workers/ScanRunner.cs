@@ -28,6 +28,7 @@ public sealed class ScanRunner(Scanner scanner, LibraryRepository library, Db db
 {
     private readonly Channel<Request> _requests = Channel.CreateUnbounded<Request>(new UnboundedChannelOptions { SingleReader = true });
     private readonly ConcurrentDictionary<string, long> _inFlight = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<long, TaskCompletionSource> _finished = new();
 
     private sealed record Request(long RootId, string? Folder, long RunId);
 
@@ -56,6 +57,7 @@ public sealed class ScanRunner(Scanner scanner, LibraryRepository library, Db db
         try
         {
             var runId = await library.CreateRunAsync(rootId, folder, ct);
+            _finished[runId] = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             _inFlight[key] = runId;
             await _requests.Writer.WriteAsync(new Request(rootId, folder, runId), ct);
             return runId;
@@ -66,6 +68,36 @@ public sealed class ScanRunner(Scanner scanner, LibraryRepository library, Db db
             throw;
         }
     }
+
+    /// <summary>
+    /// The run of the scan of exactly this (root, folder) that is queued or
+    /// running, or null when there is none. Waits out the moment between a
+    /// scan being claimed and its run row existing.
+    /// </summary>
+    public async Task<long?> InFlightRunIdAsync(long rootId, string? folder, CancellationToken ct)
+    {
+        var key = Key(rootId, Scanner.NormaliseFolder(folder));
+        for (var i = 0; i < 50; i++)
+        {
+            if (!_inFlight.TryGetValue(key, out var runId))
+            {
+                return null;
+            }
+
+            if (runId > 0)
+            {
+                return runId;
+            }
+
+            await Task.Delay(20, ct);
+        }
+
+        return null;
+    }
+
+    /// <summary>Completes when that run has finished, or at once when it is not one of this runner's.</summary>
+    public Task WhenFinishedAsync(long runId, CancellationToken ct) =>
+        _finished.TryGetValue(runId, out var done) ? done.Task.WaitAsync(ct) : Task.CompletedTask;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -88,6 +120,10 @@ public sealed class ScanRunner(Scanner scanner, LibraryRepository library, Db db
             finally
             {
                 _inFlight.TryRemove(Key(req.RootId, req.Folder), out _);
+                if (_finished.TryRemove(req.RunId, out var done))
+                {
+                    done.TrySetResult();
+                }
             }
         }
     }

@@ -59,11 +59,23 @@ public sealed record Album
     public string Description { get; init; } = "";
     public long? CoverContentId { get; init; }
 
-    /// <summary>What to draw: the choice if there is one, else a stable member.</summary>
+    /// <summary>What to draw: the choice if there is one, else a stable live member.</summary>
     public long? ShownCoverContentId { get; init; }
+
+    /// <summary>Live members: pictures with a location neither trashed nor gone.</summary>
     public int ItemCount { get; init; }
+
+    /// <summary>"manual" (a person's) or "folder" (the folder rule's).</summary>
+    public string Origin { get; init; } = AlbumOrigin.Manual;
     public DateTimeOffset CreatedAt { get; init; }
     public DateTimeOffset UpdatedAt { get; init; }
+}
+
+/// <summary>Who made an album. Only the folder rule's are ever deleted by the app.</summary>
+public static class AlbumOrigin
+{
+    public const string Manual = "manual";
+    public const string Folder = "folder";
 }
 
 public sealed record ScanRoot
@@ -80,6 +92,16 @@ public sealed record ScanRoot
     /// root's own children (the default: folders are albums), null for none.
     /// </summary>
     public string? AlbumFolder { get; init; } = "";
+
+    /// <summary>A folder the app made for itself (the Tessera folder): the one place it writes.</summary>
+    public bool AppOwned { get; init; }
+
+    /// <summary>
+    /// Other roots inside this one, as canonical absolute paths. Only an
+    /// app-owned folder may sit inside a person's root; the scan and the
+    /// watch leave it to its own root, so nothing is indexed twice.
+    /// </summary>
+    public string[] Nested { get; init; } = [];
 }
 
 /// <summary>

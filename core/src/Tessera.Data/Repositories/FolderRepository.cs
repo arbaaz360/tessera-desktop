@@ -38,6 +38,9 @@ public sealed class FolderRepository(Db db)
 
         public string[] Exclude => ParseExclude(ExcludeJson);
 
+        /// <summary>Other roots inside this one (an app-owned folder), canonical; the watch leaves them alone.</summary>
+        public string[] Nested { get; init; } = [];
+
         /// <summary>The folder whose children the watch minds, relative to the root ('' = the root).</summary>
         public string Parent => AlbumFolder ?? "";
     }
@@ -118,12 +121,28 @@ public sealed class FolderRepository(Db db)
             )
             """;
 
+        // Made here means made by the rule. A person's album that happens to
+        // share the folder's name is filled, not taken over: it stays theirs.
         var albums = await conn.ExecuteAsync(new CommandDefinition(
             named + """
 
-            INSERT INTO album (account_id, name)
-            SELECT DISTINCT account_id, name FROM named WHERE true
+            INSERT INTO album (account_id, name, origin)
+            SELECT DISTINCT account_id, name, 'folder' FROM named WHERE true
             ON CONFLICT (account_id, name) DO NOTHING
+            """,
+            new { RootId = rootId, Folder = folder }, commandTimeout: 600, cancellationToken: ct));
+
+        // Which roots imply which albums, so removing a root can tell the
+        // albums it leaves behind from the ones another root still holds.
+        await conn.ExecuteAsync(new CommandDefinition(
+            named + """
+
+            INSERT INTO album_root (album_id, root_id)
+            SELECT DISTINCT a.album_id, @RootId
+              FROM named n
+              JOIN album a ON a.account_id = n.account_id AND a.name = n.name
+             WHERE true
+            ON CONFLICT DO NOTHING
             """,
             new { RootId = rootId, Folder = folder }, commandTimeout: 600, cancellationToken: ct));
 
@@ -177,12 +196,14 @@ public sealed class FolderRepository(Db db)
     public async Task<IReadOnlyList<WatchedRoot>> RootsAsync(CancellationToken ct)
     {
         await using var conn = await db.OpenAsync(ct);
-        return (await conn.QueryAsync<WatchedRoot>(new CommandDefinition(
+        var roots = (await conn.QueryAsync<WatchedRoot>(new CommandDefinition(
             """
             SELECT root_id AS RootId, account_id AS AccountId, label AS Label, abs_path AS AbsPath,
                    album_folder AS AlbumFolder, exclude AS ExcludeJson
               FROM scan_root WHERE enabled = 1 ORDER BY root_id
             """, cancellationToken: ct))).ToList();
+        var all = await conn.QueryAsync<string>(new CommandDefinition("SELECT abs_path FROM scan_root", cancellationToken: ct));
+        return roots.Select(r => r with { Nested = LibraryRepository.NestedIn(r.AbsPath, all) }).ToList();
     }
 
     public async Task<FolderRow?> GetAsync(long rootId, string folder, CancellationToken ct)

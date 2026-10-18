@@ -72,6 +72,25 @@ internal static partial class Logs
     [LoggerMessage(Level = LogLevel.Information, Message = "Scan {RunId}: folder albums +{Albums}, memberships +{Members}, thumbnails queued {Thumbnails}")]
     public static partial void ScanFolderAlbums(this ILogger logger, long runId, int albums, int members, int thumbnails);
 
+    [LoggerMessage(Level = LogLevel.Information, Message = "Root {RootId} removed; {Albums} folder albums it left with no live picture went with it")]
+    public static partial void RootRemoved(this ILogger logger, long rootId, int albums);
+
+    // ---------------------------------------------------------------- imports
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Import {ImportId} queued: {Items} items, album {AlbumId}")]
+    public static partial void ImportQueued(this ILogger logger, long importId, int items, long? albumId);
+
+    [LoggerMessage(Level = LogLevel.Information,
+        Message = "Import {ImportId} finished: added {Added}, already {Already}, copied {Copied}, skipped {Skipped}, folders {Folders}, cancelled {Cancelled}, {ElapsedMs} ms")]
+    public static partial void ImportFinished(this ILogger logger, long importId, int added, int already, int copied,
+        int skipped, int folders, bool cancelled, long elapsedMs);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Import of {Source} failed")]
+    public static partial void ImportItemFailed(this ILogger logger, Exception ex, string source);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "{Count} imports were left unfinished by the previous process; marked cancelled")]
+    public static partial void InterruptedImports(this ILogger logger, int count);
+
     // ---------------------------------------------------------------- watch
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Watch: {Root} has {Folders} folders; {News} of them hold nothing Tessera knows and will be scanned")]

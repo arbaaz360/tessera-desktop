@@ -1,4 +1,5 @@
 using Tessera.Api.Auth;
+using Tessera.Api.Import;
 using Tessera.Api.Licence;
 using Tessera.Api.Workers;
 using Tessera.Core;
@@ -23,7 +24,8 @@ public static class LibraryEndpoints
 
         g.MapGet("/", async (
             CurrentUser me, LibraryRepository library, JobRepository jobs, FreeTier tier,
-            ScanRunner scans, LibraryWatch watch, HeaderBackfill backfill, IImageEmbedder embedder, CancellationToken ct) =>
+            ScanRunner scans, LibraryWatch watch, HeaderBackfill backfill, IImageEmbedder embedder,
+            ImportRunner imports, ImportRepository importRuns, TesseraFolder tesseraFolder, CancellationToken ct) =>
         {
             var accountId = me.AccountIdOrThrow;
             var roots = await library.RootsAsync(accountId, ct);
@@ -32,6 +34,8 @@ public static class LibraryEndpoints
             var embeddings = await jobs.EmbeddingCountsAsync(embedder.ModelId, ct);
             var licence = await tier.StatusAsync(ct);
             var dates = await backfill.CountsAsync(runs.Values.Max(r => r.FinishedAt), ct);
+            var lastImport = await importRuns.LatestAsync(ct);
+            var appFolder = await tesseraFolder.PathAsync(ct);
 
             return Results.Ok(new
             {
@@ -52,6 +56,19 @@ public static class LibraryEndpoints
                 },
                 licence = LicenceDto(licence),
                 watch = new { running = watch.Running, lastTick = Api.Iso(watch.LastTick) },
+                // Drops, file picks and folder adds: how many are under way,
+                // and what the newest did.
+                imports = new
+                {
+                    running = imports.Running,
+                    last = lastImport is null ? null : ImportEndpoints.Dto(lastImport),
+                },
+                // The one place the app writes; rootId is null until first use.
+                tesseraFolder = new
+                {
+                    path = appFolder,
+                    rootId = roots.FirstOrDefault(r => string.Equals(r.AbsPath, appFolder, StringComparison.OrdinalIgnoreCase))?.RootId,
+                },
             });
         });
 
@@ -107,7 +124,7 @@ public static class LibraryEndpoints
         });
 
         g.MapDelete("/roots/{rootId:long}", async (
-            long rootId, CurrentUser me, LibraryRepository library, ScanRunner scans, CancellationToken ct) =>
+            long rootId, CurrentUser me, LibraryRepository library, ScanRunner scans, ILogger<ScanRunner> log, CancellationToken ct) =>
         {
             if (await library.RootAsync(rootId, ct) is null)
             {
@@ -119,9 +136,13 @@ public static class LibraryEndpoints
                 return Api.Fail(StatusCodes.Status409Conflict, "A scan of that root is running; try again when it finishes");
             }
 
-            return await library.RemoveRootAsync(me.AccountIdOrThrow, rootId, ct)
-                ? Results.NoContent()
-                : Api.NotFound($"No root {rootId}");
+            if (await library.RemoveRootAsync(me.AccountIdOrThrow, rootId, ct) is not { } albums)
+            {
+                return Api.NotFound($"No root {rootId}");
+            }
+
+            log.RootRemoved(rootId, albums);
+            return Results.NoContent();
         });
 
         g.MapPost("/roots/{rootId:long}/scan", async (
@@ -162,6 +183,7 @@ public static class LibraryEndpoints
         path = r.AbsPath,
         label = r.Label,
         enabled = r.Enabled,
+        appOwned = r.AppOwned,
         counts = new { files = r.Files, contents = r.Contents, trashed = r.Trashed },
         lastScan = last is null ? null : new
         {

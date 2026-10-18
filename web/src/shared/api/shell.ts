@@ -29,6 +29,16 @@ export interface LicenceActivation {
   error: LicenceActivationError | null;
 }
 
+/**
+ * The system file picker, several at once, pictures and videos only. Null
+ * when the person cancelled, or outside Tauri (the page uses a file input).
+ */
+export async function pickFiles(): Promise<string[] | null> {
+  if (!isTauri()) return null;
+  const paths = await invoke<string[] | null>('pick_files');
+  return Array.isArray(paths) && paths.length > 0 ? paths : null;
+}
+
 /** The system folder picker. Null when the person cancelled, or outside Tauri. */
 export async function pickFolder(): Promise<string | null> {
   if (!isTauri()) return null;

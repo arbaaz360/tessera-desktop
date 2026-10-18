@@ -333,6 +333,45 @@ public sealed class ContentRepository(Db db)
         return new DateCounts(pending, exif, name, mtime);
     }
 
+    /// <summary>
+    /// These bytes, if the library holds them: the content and whether any of
+    /// its live locations is out of the trash. Null when no live location has
+    /// them - a content whose folder left the library is not "in the library".
+    /// </summary>
+    public async Task<(long ContentId, bool Visible)?> LiveByShaAsync(long accountId, byte[] sha256, CancellationToken ct)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        return await conn.QuerySingleOrDefaultAsync<(long ContentId, bool Visible)?>(new CommandDefinition(
+            """
+            SELECT c.content_id, max(l.trashed_at IS NULL)
+              FROM content c
+              JOIN location l ON l.content_id = c.content_id AND l.account_id = @AccountId AND l.gone_at IS NULL
+             WHERE c.sha256 = @Sha
+             GROUP BY c.content_id
+            """,
+            new { AccountId = accountId, Sha = sha256 }, cancellationToken: ct));
+    }
+
+    /// <summary>
+    /// Bring a picture back out of the trash, when every live copy of it is
+    /// trashed: someone added it again, which says they want to see it.
+    /// </summary>
+    /// <returns>True when it was in the trash and is now back.</returns>
+    public async Task<bool> RestoreIfAllTrashedAsync(long accountId, long contentId, CancellationToken ct)
+    {
+        await using var conn = await db.OpenWriteAsync(ct);
+        return await conn.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE location SET trashed_at = NULL
+             WHERE account_id = @AccountId AND content_id = @ContentId
+               AND gone_at IS NULL AND trashed_at IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM location l2
+                                WHERE l2.account_id = @AccountId AND l2.content_id = @ContentId
+                                  AND l2.gone_at IS NULL AND l2.trashed_at IS NULL)
+            """,
+            new { AccountId = accountId, ContentId = contentId }, cancellationToken: ct)) > 0;
+    }
+
     /// <summary>A file seen again, unchanged: stamp it so the scan does not mark it gone.</summary>
     public async Task TouchAsync(long rootId, string relPath, DateTimeOffset now, CancellationToken ct)
     {
