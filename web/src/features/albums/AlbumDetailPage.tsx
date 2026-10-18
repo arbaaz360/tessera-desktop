@@ -10,6 +10,7 @@ import { SelectionProvider } from '@/features/selection/SelectionContext';
 import { SelectionBar } from '@/features/selection/SelectionBar';
 import type { TimelineAsset } from '@/shared/api/timeline';
 import { CoverPicker } from './CoverPicker';
+import { AddButtons, EmptyLibraryHint } from '@/features/import/AddButtons';
 import { useDeleteAlbum, useRenameAlbum } from './api';
 
 /**
@@ -29,12 +30,10 @@ import { useDeleteAlbum, useRenameAlbum } from './api';
  */
 export function AlbumDetailPage() {
   const { albumId } = useParams({ from: '/app/albums/$albumId' });
-  const navigate = useNavigate();
 
   const { data: album, isPending, isError } = useAlbum(albumId);
   const [mediaType, setMediaType] = useState<MediaTypeValue>('ALL');
   const [viewer, setViewer] = useState<{ assets: TimelineAsset[]; index: number } | null>(null);
-  const [smartTerm, setSmartTerm] = useState('');
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [pickingCover, setPickingCover] = useState(false);
 
@@ -55,8 +54,17 @@ export function AlbumDetailPage() {
     return <p className="p-8 text-center text-ink-muted">Could not load that album.</p>;
   }
 
+  const target = { albumId: album.id, albumName: album.albumName };
+
+  // The whole page is a drop target for this album: pictures dragged onto it
+  // from a folder are added here (features/import/DropZone).
   return (
-    <div className="flex h-full flex-col">
+    <div
+      className="flex h-full flex-col"
+      data-drop-album-id={album.id}
+      data-drop-album-name={album.albumName}
+      data-drop-page=""
+    >
       <header className="border-b border-line-soft px-4 py-3">
         <Link to="/albums" className="text-sm text-ink-faint hover:text-ink">
           ← Albums
@@ -72,30 +80,12 @@ export function AlbumDetailPage() {
           </div>
 
           <div className="ml-auto flex flex-wrap items-center gap-2">
-            {/* Search scoped to this album. Sends the user to the search page
-                with albumId pinned, rather than duplicating result rendering. */}
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                if (smartTerm.trim()) {
-                  void navigate({
-                    to: '/search',
-                    search: { q: smartTerm.trim(), albumId, similar: undefined },
-                  });
-                }
-              }}
-            >
-              <input
-                type="search"
-                value={smartTerm}
-                onChange={(event) => setSmartTerm(event.target.value)}
-                placeholder="Search in this album"
-                aria-label="Search within this album"
-                className="w-52 rounded-md border border-line bg-surface px-3 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
-              />
-            </form>
-
+            {/* Searching in this album is the top bar's box: on an album page
+                it is scoped to the album already (GlobalSearch). A second box
+                here said the same thing twice. */}
             <MediaTypeFilter value={mediaType} onChange={setMediaType} />
+
+            <AddButtons target={target} />
 
             <button
               type="button"
@@ -134,14 +124,19 @@ export function AlbumDetailPage() {
             query={query}
             onSelect={(asset, all) => setViewer({ assets: all, index: all.indexOf(asset) })}
             emptyMessage={
-              mediaType === 'ALL'
-                ? 'This album is empty. Select pictures in the library and add them here.'
-                : `No ${mediaType === 'IMAGE' ? 'pictures' : 'videos'} in this album.`
+              mediaType === 'ALL' ? (
+                <EmptyLibraryHint
+                  target={target}
+                  lead="This album is empty. Drop pictures here, add them below, or select pictures in the library and add them to it."
+                />
+              ) : (
+                `No ${mediaType === 'IMAGE' ? 'pictures' : 'videos'} in this album.`
+              )
             }
           />
         </div>
 
-        <SelectionBar />
+        <SelectionBar albumId={album.id} />
       </SelectionProvider>
 
       {viewer && (

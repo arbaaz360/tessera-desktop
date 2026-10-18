@@ -6,6 +6,7 @@ import { apiErrorMessage } from '@/shared/api/tessera';
 import type { DuplicateSet, Library, LibraryRoot } from '@/shared/api/types';
 import { formatBytes, formatDateTime } from '@/shared/format';
 import { ConfirmDialog } from '@/features/selection/ConfirmDialog';
+import { summarizeCounts } from '@/features/import/api';
 import { Bar, SearchModelProgress } from './SearchModelProgress';
 import { thumbnailsHeldByCap, useAddRoot, useDuplicates, useLibrary, useRemoveRoot, useScanRoot } from './api';
 
@@ -52,9 +53,12 @@ export function LibraryPage() {
               <h2 className="mb-2 text-sm font-semibold text-ink">
                 Folders <span className="font-normal text-ink-faint">· {library.data.roots.length}</span>
               </h2>
+              <LastImport library={library.data} />
               {library.data.roots.length === 0 ? (
                 <p className="rounded-lg border border-line bg-surface p-5 text-sm text-ink-muted">
-                  No folders yet. Add one and Tessera starts reading it.
+                  No folders yet. Add one and Tessera starts reading it, or drop pictures onto the
+                  window: those from outside your folders are copied into{' '}
+                  <span className="break-all font-mono text-[12px]">{library.data.tesseraFolder?.path ?? 'Pictures/Tessera'}</span>.
                 </p>
               ) : (
                 <ul className="space-y-3">
@@ -198,10 +202,23 @@ function RootCard({ root, onRemove }: { root: LibraryRoot; onRemove: () => void 
     <li className="rounded-lg border border-line bg-surface p-4">
       <div className="flex flex-wrap items-start gap-3">
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-ink">{root.label}</p>
+          <p className="text-sm font-medium text-ink">
+            {root.label}
+            {root.appOwned && (
+              <span className="ml-2 rounded border border-accent/50 px-1.5 py-0.5 align-middle text-[11px] font-normal text-accent">
+                Tessera folder
+              </span>
+            )}
+          </p>
           <p className="break-all font-mono text-[12px] text-ink-faint" title={root.path}>
             {root.path}
           </p>
+          {root.appOwned && (
+            <p className="mt-0.5 text-xs text-ink-faint">
+              Pictures dropped or picked from outside your folders are copied here, one folder per album.
+              The only folder Tessera writes to.
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -377,6 +394,19 @@ function DuplicateRow({ set }: { set: DuplicateSet }) {
  * Removing a folder. The dialog says the one thing that matters: files are
  * untouched. The core forgets where the pictures are; the pictures stay.
  */
+/** The newest drop, pick or folder add, in numbers. */
+function LastImport({ library }: { library: Library }) {
+  const last = library.imports?.last;
+  if (!last) return null;
+  const running = (library.imports?.running ?? 0) > 0;
+  return (
+    <p className="mb-2 text-xs tabular-nums text-ink-faint">
+      {running ? 'Adding now. ' : ''}Last added {formatDateTime(last.finishedAt ?? last.startedAt)}:{' '}
+      {last.total.toLocaleString()} {last.total === 1 ? 'item' : 'items'}, {summarizeCounts(last.counts)}.
+    </p>
+  );
+}
+
 function RemoveRootDialog({ root, onClose }: { root: LibraryRoot; onClose: () => void }) {
   const remove = useRemoveRoot();
 
@@ -391,7 +421,8 @@ function RemoveRootDialog({ root, onClose }: { root: LibraryRoot; onClose: () =>
     >
       Tessera stops watching <span className="break-all font-mono text-[12px]">{root.path}</span> and
       forgets the {root.counts.contents.toLocaleString()} pictures it found there. The files on disk
-      are not touched. Albums keep their members.
+      are not touched. Albums made from its folders go too, unless they still hold a picture from
+      elsewhere; your own albums stay, and get their pictures back if the folder is added again.
       {remove.isError && <p className="mt-2 text-danger">{apiErrorMessage(remove.error)}</p>}
     </ConfirmDialog>
   );

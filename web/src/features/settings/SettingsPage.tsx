@@ -1,7 +1,8 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useLocation } from '@tanstack/react-router';
-import { appVersion, licenceActivate, licenceGet, openExternal, type ShellLicence } from '@/shared/api/shell';
+import { appVersion, licenceActivate, licenceGet, openExternal, pickFolder, type ShellLicence } from '@/shared/api/shell';
+import { isTauri } from '@/shared/api/core';
 import { apiErrorMessage } from '@/shared/api/tessera';
 import { qk } from '@/shared/api/queries';
 import { formatDateTime } from '@/shared/format';
@@ -77,6 +78,7 @@ function GeneralSection() {
               label="Index on battery"
             />
           </Field>
+          <TesseraFolderField path={settings.data.tesseraFolder} />
           {update.isError && <p className="text-xs text-danger">{apiErrorMessage(update.error)}</p>}
         </>
       )}
@@ -248,6 +250,47 @@ function LicenceSection() {
   );
 }
 
+/**
+ * Where pictures from outside the library are copied: the one folder the app
+ * writes to. Moving it changes where the next copies go; what was copied
+ * before stays where it is, and stays in the library.
+ */
+function TesseraFolderField({ path }: { path?: string | undefined }) {
+  const client = useQueryClient();
+  const move = useUpdateSettings();
+
+  const choose = async () => {
+    const folder = isTauri()
+      ? await pickFolder()
+      : window.prompt('The full path of the new Tessera folder', path ?? '')?.trim() || null;
+    if (!folder) return;
+    move.mutate(
+      { tesseraFolder: folder },
+      { onSuccess: () => void client.invalidateQueries({ queryKey: qk.library.all }) },
+    );
+  };
+
+  return (
+    <div className="space-y-1">
+      <Field
+        label="Tessera folder"
+        hint="Pictures dropped or picked from outside your folders are copied here, one folder per album. Moving it changes where the next ones go; nothing already copied moves."
+      >
+        <button
+          type="button"
+          onClick={() => void choose()}
+          disabled={move.isPending}
+          className="rounded-md border border-line px-3 py-1.5 text-sm text-ink-muted transition-colors hover:bg-raised hover:text-ink disabled:opacity-50"
+        >
+          {move.isPending ? 'Moving…' : 'Move…'}
+        </button>
+      </Field>
+      <p className="break-all font-mono text-[12px] text-ink-faint">{path ?? '—'}</p>
+      {move.isError && <p className="text-xs text-danger">{apiErrorMessage(move.error)}</p>}
+    </div>
+  );
+}
+
 function AboutSection() {
   const settings = useSettings();
   const [shellVersion, setShellVersion] = useState<string | null>(null);
@@ -277,7 +320,8 @@ function AboutSection() {
       </dl>
       <p className="text-xs text-ink-faint">
         Tessera talks to the internet for three things only: downloading the search model, checking
-        a licence key, and looking for updates. Your pictures never leave this machine.
+        a licence key, and looking for updates - and, when you drop a link from a browser onto the
+        window, fetching that one picture. Your pictures never leave this machine.
       </p>
     </Section>
   );

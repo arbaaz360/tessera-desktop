@@ -807,6 +807,11 @@ route('GET', /^\/api\/library$/, (ctx) => {
     embeddings: { pending: Math.max(0, embeddable - embedded), done: embedded, model: MODEL, ready: state.modelReady },
     licence: licenceDto(),
     watch: { running: state.roots.length > 0, lastTick: iso(watchTick) },
+    imports: {
+      running: [...imports.values()].filter((job) => importDto(job).state === 'running').length,
+      ...(lastImportId ? { last: { ...importDto(imports.get(lastImportId)), items: [] } } : {}),
+    },
+    tesseraFolder: { path: state.tesseraFolder ?? TESSERA_FOLDER_DEFAULT },
   });
 });
 
@@ -879,11 +884,103 @@ route('GET', /^\/api\/library\/duplicates$/, (ctx) => {
   json(ctx.res, 200, sets);
 });
 
+// imports (contract §4): a job per drop or pick. The mock cannot copy or
+// fetch anything, so a file counts as copied, a folder becomes a root as on
+// the Library page, a link is skipped; each job finishes after a second and
+// a half, so the progress toast can be seen moving.
+const imports = new Map();
+let nextImportId = 1;
+let lastImportId = null;
+const TESSERA_FOLDER_DEFAULT = 'C:/Users/me/Pictures/Tessera';
+const NO_IMPORT_COUNTS = { added: 0, already: 0, copied: 0, skipped: 0, folders: 0 };
+
+function importDto(job) {
+  const elapsed = Date.now() - job.started;
+  const done = job.items.length === 0 ? 0 : Math.min(job.items.length, Math.floor((elapsed / 1500) * job.items.length));
+  const items = job.items.map((item, i) => (i < done ? item : { source: item.source, kind: item.kind, outcome: 'pending' }));
+  const counts = { ...NO_IMPORT_COUNTS };
+  for (const item of items.slice(0, done)) {
+    if (item.outcome === 'skipped') counts.skipped += 1;
+    else if (item.kind === 'folder') counts.folders += 1;
+    else counts[item.outcome] += 1;
+  }
+  const finished = done === job.items.length;
+  return {
+    id: job.id,
+    ...(job.albumId ? { albumId: job.albumId } : {}),
+    state: finished ? 'done' : 'running',
+    startedAt: iso(job.started),
+    ...(finished ? { finishedAt: iso(job.started + 1500) } : {}),
+    total: job.items.length,
+    done,
+    counts,
+    items,
+  };
+}
+
+function startMockImport(items, albumId) {
+  const job = { id: nextImportId++, albumId, started: Date.now(), items };
+  imports.set(job.id, job);
+  lastImportId = job.id;
+  return job;
+}
+
+route('POST', /^\/api\/import$/, async (ctx) => {
+  const body = await readBody(ctx.req);
+  const paths = Array.isArray(body.paths) ? body.paths.filter((p) => typeof p === 'string' && p.trim()) : [];
+  const urls = Array.isArray(body.urls) ? body.urls.filter((u) => typeof u === 'string' && u.trim()) : [];
+  if (paths.length + urls.length === 0) return problem(ctx.res, 400, 'Nothing to import: give paths or urls');
+  if (body.albumId && !allAlbums().some((a) => a.id === body.albumId)) return problem(ctx.res, 404, `No album ${body.albumId}`);
+  const items = [
+    ...paths.map((path) => {
+      const looksLikeFile = /\.[a-z0-9]{2,5}$/i.test(path);
+      if (looksLikeFile) return { source: path, kind: 'file', outcome: 'copied', path: `${state.tesseraFolder ?? TESSERA_FOLDER_DEFAULT}/Unsorted/${path.split(/[\\/]/).pop()}` };
+      const root = {
+        id: state.nextRootId++,
+        path,
+        label: path.split(/[\\/]/).filter(Boolean).pop() ?? path,
+        enabled: true,
+        addedAt: new Date().toISOString(),
+        discovered: 0,
+        scanning: true,
+        lastScan: { seen: 0, added: 0, moved: 0, gone: 0, errors: 0, startedAt: new Date().toISOString(), finishedAt: null },
+        runs: 1,
+      };
+      state.roots.push(root);
+      return { source: path, kind: 'folder', outcome: 'added', path, rootId: root.id, pictures: ASSETS_PER_ROOT };
+    }),
+    ...urls.map((url) => ({ source: url, kind: 'url', outcome: 'skipped', reason: 'the mock does not fetch links' })),
+  ];
+  save();
+  json(ctx.res, 202, importDto(startMockImport(items, body.albumId)));
+});
+
+route('GET', /^\/api\/import\/(\d+)$/, (ctx, [, id]) => {
+  const job = imports.get(Number(id));
+  if (!job) return problem(ctx.res, 404, `No import ${id}`);
+  json(ctx.res, 200, importDto(job));
+});
+
+route('POST', /^\/api\/import\/upload$/, async (ctx) => {
+  const name = ctx.url.searchParams.get('name') ?? '';
+  if (!name) return problem(ctx.res, 400, 'name is required: the file\'s own name');
+  for await (const _chunk of ctx.req) {
+    // the bytes are read and dropped: the mock keeps no files
+  }
+  const job = startMockImport(
+    [{ source: name, kind: 'upload', outcome: 'copied', path: `${state.tesseraFolder ?? TESSERA_FOLDER_DEFAULT}/Unsorted/${name}` }],
+    ctx.url.searchParams.get('albumId') ?? undefined,
+  );
+  job.started -= 1500;
+  json(ctx.res, 200, importDto(job));
+});
+
 // settings and licence
 const settingsDto = () => ({
   ...state.settings,
   version: '0.0.0-mock',
   dataDir: 'C:\\Users\\me\\AppData\\Local\\TesseraDesktop (mock)',
+  tesseraFolder: state.tesseraFolder ?? TESSERA_FOLDER_DEFAULT,
 });
 route('GET', /^\/api\/settings$/, (ctx) => json(ctx.res, 200, settingsDto()));
 route('PUT', /^\/api\/settings$/, async (ctx) => {
@@ -892,6 +989,10 @@ route('PUT', /^\/api\/settings$/, async (ctx) => {
     state.settings.thumbnailConcurrency = Math.min(16, Math.max(1, Math.round(body.thumbnailConcurrency)));
   }
   if (typeof body.embedOnBattery === 'boolean') state.settings.embedOnBattery = body.embedOnBattery;
+  if (typeof body.tesseraFolder === 'string') {
+    if (!/^([a-zA-Z]:[\\/]|\/)/.test(body.tesseraFolder)) return problem(ctx.res, 400, 'The Tessera folder must be an absolute path.');
+    state.tesseraFolder = body.tesseraFolder.replace(/\\/g, '/');
+  }
   save();
   json(ctx.res, 200, settingsDto());
 });

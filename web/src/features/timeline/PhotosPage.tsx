@@ -6,6 +6,7 @@ import { SelectionProvider } from '@/features/selection/SelectionContext';
 import { SelectionBar } from '@/features/selection/SelectionBar';
 import type { AssetOrder } from '@/shared/api/types';
 import type { TimelineAsset, TimelineAssetType } from '@/shared/api/timeline';
+import { AddButtons, EmptyLibraryHint } from '@/features/import/AddButtons';
 
 /**
  * The main timeline.
@@ -45,9 +46,10 @@ export function PhotosPage() {
       <div className="flex h-full flex-col">
         <div className="flex items-center gap-3 border-b border-line-soft px-4 py-2.5">
           <h1 className="text-sm font-medium text-ink-muted">Timeline</h1>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex flex-wrap items-center gap-2">
             <OrderToggle value={order} onChange={setOrder} />
             <MediaTypeFilter value={mediaType} onChange={setMediaType} />
+            <AddButtons target={null} />
           </div>
         </div>
 
@@ -60,7 +62,7 @@ export function PhotosPage() {
                 ? 'No videos in this timeline.'
                 : mediaType === 'IMAGE'
                   ? 'No photos in this timeline.'
-                  : 'Nothing here yet.'
+                  : <EmptyLibraryHint target={null} lead="No pictures yet." />
             }
           />
         </div>

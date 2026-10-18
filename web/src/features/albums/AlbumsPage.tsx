@@ -441,7 +441,11 @@ function albumDateLabel(album: AlbumDto): string {
  */
 function AlbumListRow({ album, overlap }: { album: AlbumDto; overlap: OverlapEntry | null }) {
   return (
-    <div className="flex h-full items-center gap-2 border-b border-line-soft pl-2">
+    <div
+      className="flex h-full items-center gap-2 border-b border-line-soft pl-2"
+      data-drop-album-id={album.id}
+      data-drop-album-name={album.albumName}
+    >
       <Link
         to="/albums/$albumId"
         params={{ albumId: album.id }}
@@ -480,7 +484,7 @@ function AlbumCard({
   onPickCover: () => void;
 }) {
   return (
-    <div className="group/card relative min-w-0">
+    <div className="group/card relative min-w-0" data-drop-album-id={album.id} data-drop-album-name={album.albumName}>
       <Link
         to="/albums/$albumId"
         params={{ albumId: album.id }}

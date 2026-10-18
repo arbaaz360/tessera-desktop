@@ -3,6 +3,9 @@ import { RouterProvider } from '@tanstack/react-router';
 import { configureApi, type CoreInfo } from '@/shared/api/client';
 import { CoreUnavailableError, isCoreReady, resolveCore } from '@/shared/api/core';
 import { useFollowCoreRestarts } from '@/shared/api/coreRestarts';
+import { ImportProvider } from '@/features/import/ImportContext';
+import { DropZone } from '@/features/import/DropZone';
+import { ImportToasts } from '@/features/import/ImportToasts';
 import { queryClient } from './queryClient';
 import { router } from './router';
 
@@ -83,7 +86,17 @@ export function AppBoot() {
     void queryClient.invalidateQueries();
   });
 
-  if (phase.kind === 'ready') return <RouterProvider key={generation} router={router} />;
+  // Imports live above the router: a drop works on every page, the welcome
+  // page included, and an import keeps going while the person navigates.
+  if (phase.kind === 'ready') {
+    return (
+      <ImportProvider key={generation}>
+        <RouterProvider router={router} />
+        <DropZone />
+        <ImportToasts />
+      </ImportProvider>
+    );
+  }
 
   return (
     <div className="grid h-full place-items-center bg-ground px-6 text-center text-ink">

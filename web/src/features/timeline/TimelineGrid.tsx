@@ -38,7 +38,8 @@ const OVERSCAN = 2;
 export interface TimelineGridProps {
   query: TimeBucketQuery;
   onSelect: (asset: TimelineAsset, all: TimelineAsset[]) => void;
-  emptyMessage?: string;
+  /** What an empty grid shows: words, or words and the buttons that fill it. */
+  emptyMessage?: React.ReactNode;
 }
 
 export function TimelineGrid({ query, onSelect, emptyMessage }: TimelineGridProps) {

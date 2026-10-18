@@ -105,6 +105,10 @@ export function useDeleteAlbum() {
   return useMutation({
     mutationFn: (id: string) =>
       apiJson<void>(`/api/albums/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-    onSuccess: () => client.invalidateQueries({ queryKey: qk.albums.all }),
+    onSuccess: () =>
+      Promise.all([
+        client.invalidateQueries({ queryKey: qk.albums.all }),
+        client.invalidateQueries({ queryKey: qk.timeline.all }),
+      ]),
   });
 }
