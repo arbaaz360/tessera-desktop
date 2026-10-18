@@ -13,7 +13,8 @@ measures.
 | `src/Tessera.Core` | Pure rules: hashing, path spelling, scan safety, capture-date parsing, the domain records |
 | `src/Tessera.Data` | SQLite: the schema (embedded migrations), Dapper repositories, the work queue |
 | `src/Tessera.Api` | Kestrel, the boot handshake, token auth, the routes, the workers, the header reader, the fake search |
-| `tests/Tessera.Tests` | 174 tests: repositories on a temp database, the scanner over real PNGs and JPEGs, header bytes written by hand (EXIF, eXIf, XMP, MP4), a 200,000-row timeline, the boot handshake against the real exe |
+| `src/Tessera.Api/Import` | Adding pictures: the Tessera folder, the copy with verify, the import job |
+| `tests/Tessera.Tests` | 193 tests: repositories on a temp database, the scanner over real PNGs and JPEGs, header bytes written by hand (EXIF, eXIf, XMP, MP4), a 200,000-row timeline, imports (inside a root, outside, known bytes, a name clash, a folder, a video, an album, a link, bytes, a copy that fails half way), folder albums and the upgrade, the boot handshake and an import against the real exe |
 | `tessera-core.slnx` | So that `dotnet test core` works from the repo root |
 
 ## Build, test, publish
@@ -49,6 +50,7 @@ $env:TESSERA_DEV = "1"                 # also allows http://localhost:5173
 | `TESSERA_WEB_ORIGIN` | required; the one origin CORS allows |
 | `TESSERA_PORT` | unset or `0`: a free port is chosen |
 | `TESSERA_DEV` | `1` also allows the Vite origin |
+| `TESSERA_FOLDER` | optional, absolute: where the Tessera folder goes instead of `Pictures/Tessera`. Set it for any run by hand that imports, or copies land in the real Pictures folder |
 
 What it prints: exactly one line on stdout, `{"event":"ready","port":N,"pid":P,"version":"1.0.0"}`.
 Everything else is JSON lines on stderr and in `logs/core-YYYY-MM-DD.log`.
@@ -100,6 +102,13 @@ and `embeddings` report `pending`, `done` and `failed`; a root reports its
 files, contents, trashed, and its last scan's seen/added/moved/copies/gone/errors,
 refreshed every two seconds while it runs.
 
+Imports (CONTRACT §4, added 2026-10-18): `POST /api/import` `{paths, urls,
+albumId}` answers `202` and a job; `GET /api/import/{id}` the job as it
+stands; `POST /api/import/upload?name=&albumId=` takes one file's bytes.
+`GET /api/library` carries `imports` (running, last) and `tesseraFolder`;
+roots carry `appOwned`; `/api/settings` reads and moves `tesseraFolder`;
+albums carry `origin` (`manual` or `folder`).
+
 Two additive fields in `GET /api/library`, beyond the contract:
 
 | Field | Meaning |
@@ -128,6 +137,11 @@ Two additive fields in `GET /api/library`, beyond the contract:
 | Free tier | while `free` and more than 2,000 distinct contents are indexed, the first 2,000 by id keep working and the rest get no thumbnail or vector; `PUT /api/licence {"state":"licensed"}` queues them |
 | Writes | one in-process writer (`Db.OpenWriteAsync`). Microsoft.Data.Sqlite waits for a busy database by sleeping 150 ms, so letting four threads contend cost a second per write; queued in-process, a rescan of 200 files went from 5 s to 23 ms |
 | Files | image files are opened through .NET streams, never Skia's `fopen`, which is ANSI and bound by MAX_PATH; a 259-character thumbnail path once failed every embedding |
+| Imports | `ImportRunner` works through a job item by item (`Importer`): a folder is indexed in place (a rescan inside a root, else a new root, waiting for its scan); a file inside a root is indexed now with the scanner's own per-file code (`Scanner.IndexFileAsync`); a file outside is hashed first and, if no live location holds those bytes, copied. One bad item is a skipped item with its reason, never a failed job. Counts go to `import_run` after every item; the per-item answers stay in memory for the last 50 jobs |
+| Copy with verify | `SafeCopy`: the bytes go to `.<random>.tessera-partial` beside the destination, are flushed to the disk, read back and hashed, and only then renamed. A source that changed since it was hashed, a short read, a full disk: the temporary file is deleted and nothing with a picture's name appears. The source is opened read-only, shared, and never moved or deleted. A name taken by other bytes gets `name (2).ext`; the same bytes under that name are the same picture |
+| The Tessera folder | `TesseraFolder`: `Pictures/Tessera` (the Pictures known folder; `~/Pictures/Tessera` on macOS) or `TESSERA_FOLDER`, decided at first use and kept in the `import.folder` setting. A root with `app_owned = 1` and no album folder: copies are filed by album name (made safe for Windows: `A: best/of?` becomes `A_ best_of_`) or `Unsorted`, and the import puts them in the album itself. It may sit inside a person's root: that root's scan and watch skip it (`ScanRoot.Nested`), so nothing is indexed twice. Moving it changes where the next copy goes; nothing moves |
+| Folder albums | `album.origin` is `folder` when the folder rule made the album, `manual` when a person made it, named it in a create, renamed it or gave it a description or cover. `album_root` links an album to each root whose folder implies it. Removing a root deletes, in the same transaction, the folder albums no root holds any more that have no live picture; a person's album is never deleted and keeps its membership, so the pictures come back if the folder does. `assetCount` and the cover use live pictures only |
+| Upgrade (0003) | Before 0003 nothing recorded who made an album, so it is read from how the rule makes them: in one statement at the end of the scan that first saw the pictures, filled by the next. Counted as the folder's when nobody edited it and its first members arrived within 2 s of the album row, and either that row came within 2 s of those pictures being first seen or another album was made in the same millisecond (a scan with two folders; no person does that). Then the leftovers go by the rule above. On a read-only backup of the live library (2026-10-18): the four test albums with no live picture were removed, the one manual album with 10 live pictures kept, all 381 content rows kept |
 
 ### A capture time with no offset
 
@@ -213,7 +227,36 @@ isolation (one thread, warm cache, its own open):
 | `dates` counts at 200,000 contents | 123 ms uncached, so reused up to 10 s while changing; an empty backfill batch 0.05 ms |
 | Published build, EXIF fixture, end to end | `dates`: exif 1,000, pending 0; `lastScan.copies` 0 |
 
+### Imports (2026-10-18)
+
+The published win-x64 core, search off, one thumbnail worker running
+alongside; 100 generated JPEGs at 1600x1200 (131 MB, 1.31 MB each) per case,
+fresh on disk (in the OS cache). Median of two runs.
+
+| One import of 100 files | Time | Rate |
+|---|---|---|
+| From outside every root: hashed, copied with verify (temp, flush, read back, rename), indexed | 2.2 s | 45 files/s, 59 MB/s |
+| The same 100 again: known bytes, nothing copied | 0.17 s | 607 files/s |
+| New files inside a root, indexed in place one by one | 0.8 s | 122 files/s |
+| A folder of 100, indexed in place (a new root and its scan, then the album) | 0.16 s | 625 files/s |
+
+A copy costs three reads and a write per file (the hash that decides
+whether to copy, the copy, the read-back) plus the scanner's own read when
+it is indexed; the verify is the read-back. A dropped folder goes through the
+scanner's parallel walk, which is why it is the fastest way in.
+
 ## Not done
+
+- **A link dropped from a browser** is fetched by the core when the web app
+  sends it (tested with a fake server); inside the Tauri app the shell's drop
+  handler does not hand links or a browser's virtual files to the page on
+  Windows (see `web/README.md`).
+- **Legacy folder albums from a big scan** (more than 2 s between a folder's
+  pictures being seen and the scan's end) are kept as a person's by the
+  upgrade: a leftover stays rather than risk deleting a person's album. They
+  can be deleted by hand.
+- **Moving the Tessera folder** does not move what is in it; the old folder
+  stays a library folder, still marked the app's.
 
 - **The real model.** `FakeImageEmbedder` (sha256-derived vectors) and
   `InMemoryVectorIndex` stand in until the search library is wired in; the

@@ -77,6 +77,50 @@ flow can be walked against the mock), `open_external` (a new tab),
 The Vite dev server is fixed to port 5173, the origin the core allows with
 `TESSERA_DEV=1`.
 
+## Adding pictures
+
+Three ways in, one route on the core (`POST /api/import`, contract §4,
+Imports). The core decides what each item means; the app only says where.
+
+| Way in | What the app sends |
+|---|---|
+| Drag from File Explorer or Finder onto the window | the paths, from Tauri's `tauri://drag-*` events (`features/import/DropZone.tsx`) |
+| "Add pictures" on the grid or an album page | the paths from the system picker (`pick_files`, contract §5); in a browser, the files' bytes to `/api/import/upload` |
+| "Add folder" on the grid or an album page | the folder's path (`pick_folder`); indexed where it is, never copied |
+| Drag from a web page (when the webview hands it over) | the bytes, or the link for the core to fetch once |
+
+| Where it lands | Target |
+|---|---|
+| an album page, anywhere on it | that album |
+| an album card or a row in the album list | that album |
+| anywhere else (grid, sidebar, welcome page) | the library |
+
+Targets are marked in the DOM (`data-drop-album-id`, `data-drop-album-name`)
+and read from under the pointer (`features/import/dropTarget.ts`); the album
+under a drag is outlined (`[data-drop-hover]`) and the overlay says "Drop to
+add 3 items to “A”". Tauri reports the position in physical pixels on Windows
+and in the view's points on macOS; `toCssPixels` handles both.
+
+`ImportProvider` (mounted above the router in `AppBoot`, so drops work on
+every page, the welcome page included) polls each job every 500 ms, refreshes
+the grid, the albums and the library every 2 s while it runs and once at the
+end. `ImportToasts` shows one card per import, bottom right: the bar, the
+counts ("3 copied in · 1 already there · 1 skipped") and, when something was
+skipped, which and why. A clean import's card goes after 8 s.
+
+A library with no folders opens on the welcome page once; it can be skipped
+("Skip for now"), and it takes pictures as well as a folder. The empty grid
+and the empty album say how to fill them, with both buttons.
+
+## Album membership and the caches
+
+Adding to, removing from or deleting an album, and every import, invalidate
+`qk.timeline.all` as well as `qk.albums.all`: an album's grid is a timeline
+query keyed by `albumId`, so invalidating only the album list once left an
+album opened while empty saying "This album is empty" under "10 items". An
+album's `assetCount` is live pictures only (core). The album page's own search
+box is gone: the top bar's box is scoped to the album already.
+
 ## What is where
 
 | Folder | Does |
@@ -90,7 +134,8 @@ The Vite dev server is fixed to port 5173, the origin the core allows with
 | `features/selection` | multi-select: favourite, add to album, trash |
 | `features/trash` | hidden pictures; restore only |
 | `features/library` | the Library page: folders, counts, scans, queues, watch, duplicates, the cap banner; the hooks for the core's own routes |
-| `features/onboarding` | first run |
+| `features/onboarding` | first run, skippable (`welcome.ts`) |
+| `features/import` | drag and drop, Add pictures / Add folder, the import jobs and their toasts |
 | `features/settings` | settings, search toggle, version, data dir, licence |
 | `mock` | the stand-in core |
 | `docs` | screenshots against the mock |
@@ -115,6 +160,17 @@ The Vite dev server is fixed to port 5173, the origin the core allows with
   check and the update feed are the shell's.
 
 ## Not done
+
+- **Browser drops in the Tauri app.** Tauri's drag-drop handler takes over
+  the window's drops. Read from wry's source (not tried by hand: desktop
+  control cannot drag out of a browser here): on Windows it accepts only
+  drops that carry files (`CF_HDROP`), so an image dragged from a Chromium
+  browser, which offers a virtual file and a link, is refused before the page
+  sees it; on macOS such a drop arrives with no paths and the app says "the
+  drop carried no file". A browser that hands over a temporary file works as a
+  file from outside. The page's own drop handler (bytes, links) works in a
+  browser against the core and is tested, but is not reached inside the
+  shell; a native handler for those formats is follow-up work.
 
 - **Cover pick persistence needs the core.** The picker sends
   `albumThumbnailAssetId` on `PATCH /api/albums/{id}` (Immich's own
