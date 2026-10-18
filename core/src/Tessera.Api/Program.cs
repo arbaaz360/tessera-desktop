@@ -8,6 +8,7 @@ using Tessera.Api;
 using Tessera.Api.Auth;
 using Tessera.Api.Boot;
 using Tessera.Api.Endpoints;
+using Tessera.Api.Import;
 using Tessera.Api.Licence;
 using Tessera.Api.Search;
 using Tessera.Api.Workers;
@@ -85,6 +86,7 @@ try
     builder.Services.AddSingleton<WorkItems>();
     builder.Services.AddSingleton<ExclusiveWork>();
     builder.Services.AddSingleton<FreeTier>();
+    builder.Services.AddSingleton<ImportRepository>();
 
     builder.Services.Configure<StorageOptions>(o => o.ThumbnailRoot = env.ThumbsDir);
     builder.Services.Configure<ScannerOptions>(_ => { });
@@ -116,6 +118,26 @@ try
     builder.Services.AddHostedService(sp => sp.GetRequiredService<HeaderBackfill>());
     builder.Services.AddSingleton<EmbeddingWorker>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<EmbeddingWorker>());
+
+    // -------------------------------------------------------------- imports
+    // The Tessera folder (Pictures/Tessera unless TESSERA_FOLDER says
+    // otherwise) is the one place the app writes. The HTTP client is for a
+    // link a person dropped, fetched once (CONTRACT §9); nothing else uses it.
+    builder.Services.Configure<TesseraFolderOptions>(o => o.DefaultPath = TesseraFolderOptions.DefaultFor(env.FolderOverride));
+    builder.Services.AddSingleton<TesseraFolder>();
+    builder.Services.AddSingleton(new ImportHttp(new HttpClient(new SocketsHttpHandler
+    {
+        AllowAutoRedirect = true,
+        MaxAutomaticRedirections = 5,
+        ConnectTimeout = TimeSpan.FromSeconds(30),
+    })
+    {
+        Timeout = Timeout.InfiniteTimeSpan,
+        DefaultRequestHeaders = { { "User-Agent", $"TesseraDesktop/{CoreEnvironment.Version}" } },
+    }));
+    builder.Services.AddSingleton<Importer>();
+    builder.Services.AddSingleton<ImportRunner>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<ImportRunner>());
 
     // -------------------------------------------------------------- json
     builder.Services.ConfigureHttpJsonOptions(o =>
@@ -195,6 +217,12 @@ try
         {
             app.Logger.InterruptedRuns(interrupted);
         }
+
+        var imports = await app.Services.GetRequiredService<ImportRepository>().MarkInterruptedAsync(CancellationToken.None);
+        if (imports > 0)
+        {
+            app.Logger.InterruptedImports(imports);
+        }
     }
 
     // -------------------------------------------------------------- routes
@@ -205,6 +233,7 @@ try
     app.MapLibrary();
     app.MapSearch();
     app.MapSettings();
+    app.MapImport();
 
     // An unmatched /api route is a JSON 404, not an empty body: the caller
     // parses it and gets a sentence that names the route.

@@ -1,5 +1,6 @@
 using Tessera.Api.Auth;
 using Tessera.Api.Boot;
+using Tessera.Api.Import;
 using Tessera.Api.Licence;
 using Tessera.Api.Workers;
 using Tessera.Data.Repositories;
@@ -9,19 +10,33 @@ namespace Tessera.Api.Endpoints;
 /// <summary>Settings and the licence state (CONTRACT §4).</summary>
 public static class SettingsEndpoints
 {
-    public sealed record SettingsBody(int? ThumbnailConcurrency, bool? EmbedOnBattery);
+    public sealed record SettingsBody(int? ThumbnailConcurrency, bool? EmbedOnBattery, string? TesseraFolder);
     public sealed record LicenceBody(string? State);
 
     public static void MapSettings(this IEndpointRouteBuilder app)
     {
         var settings = app.MapGroup("/api/settings").WithTags("settings").RequireUser();
 
-        settings.MapGet("/", async (SettingsRepository repo, CoreEnvironment env, CancellationToken ct) =>
-            Results.Ok(Dto(await repo.ReadAsync(ct), env)));
+        settings.MapGet("/", async (SettingsRepository repo, CoreEnvironment env, TesseraFolder folder, CancellationToken ct) =>
+            Results.Ok(Dto(await repo.ReadAsync(ct), env, await folder.PathAsync(ct))));
 
         // Partial: a field left out keeps its value.
-        settings.MapPut("/", async (SettingsBody body, SettingsRepository repo, CoreEnvironment env, CancellationToken ct) =>
+        settings.MapPut("/", async (
+            SettingsBody body, SettingsRepository repo, CoreEnvironment env, TesseraFolder folder, CancellationToken ct) =>
         {
+            // Where the next copies go. Nothing copied before moves.
+            if (body.TesseraFolder is { } wanted)
+            {
+                try
+                {
+                    await folder.MoveAsync(wanted, ct);
+                }
+                catch (TesseraFolderException ex)
+                {
+                    return Api.Fail(ex.BadRequest ? StatusCodes.Status400BadRequest : StatusCodes.Status409Conflict, ex.Message);
+                }
+            }
+
             if (body.ThumbnailConcurrency is { } n)
             {
                 if (n is < 1 or > 64)
@@ -37,7 +52,7 @@ public static class SettingsEndpoints
                 await repo.SetEmbedOnBatteryAsync(b, ct);
             }
 
-            return Results.Ok(Dto(await repo.ReadAsync(ct), env));
+            return Results.Ok(Dto(await repo.ReadAsync(ct), env, await folder.PathAsync(ct)));
         });
 
         var licence = app.MapGroup("/api/licence").WithTags("licence").RequireUser();
@@ -68,11 +83,12 @@ public static class SettingsEndpoints
         });
     }
 
-    private static object Dto(AppSettings s, CoreEnvironment env) => new
+    private static object Dto(AppSettings s, CoreEnvironment env, string tesseraFolder) => new
     {
         thumbnailConcurrency = s.ThumbnailConcurrency,
         embedOnBattery = s.EmbedOnBattery,
         version = CoreEnvironment.Version,
         dataDir = env.DataDir,
+        tesseraFolder,
     };
 }

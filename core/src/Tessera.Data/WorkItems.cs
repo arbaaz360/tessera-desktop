@@ -141,6 +141,28 @@ public sealed class WorkItems(Db db)
             cancellationToken: ct));
     }
 
+    /// <summary>
+    /// Queue a thumbnail for a picture that has none, unless one is already
+    /// open or has failed for good. A picture added a second time, whose
+    /// thumbnail exists, queues nothing.
+    /// </summary>
+    public async Task<bool> EnqueueThumbnailIfMissingAsync(long contentId, CancellationToken ct)
+    {
+        await using var conn = await db.OpenWriteAsync(ct);
+        return await conn.ExecuteAsync(new CommandDefinition(
+            """
+            INSERT INTO work_item (kind, content_id)
+            SELECT 'thumbnail', @ContentId
+             WHERE NOT EXISTS (SELECT 1 FROM thumbnail t WHERE t.content_id = @ContentId AND t.kind = 'thumb')
+               AND NOT EXISTS (SELECT 1 FROM work_item w
+                                WHERE w.kind = 'thumbnail' AND w.content_id = @ContentId
+                                  AND w.state IN ('pending', 'running', 'failed'))
+            ON CONFLICT DO NOTHING
+            """,
+            new { ContentId = contentId },
+            cancellationToken: ct)) > 0;
+    }
+
     /// <summary>Queue one item, unless one is already open or has failed for good.</summary>
     public async Task<bool> EnqueueAsync(string kind, long contentId, CancellationToken ct)
     {

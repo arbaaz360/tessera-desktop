@@ -158,7 +158,7 @@ public sealed class Scanner(
         {
             try
             {
-                foreach (var file in EnumerateMedia(walkFrom, root.Exclude))
+                foreach (var file in EnumerateMedia(walkFrom, root.Exclude, root.Nested))
                 {
                     await channel.Writer.WriteAsync(file, ct);
                 }
@@ -175,7 +175,7 @@ public sealed class Scanner(
             {
                 try
                 {
-                    var result = await ProcessAsync(root, file, known, opts, ct);
+                    var (_, result) = await ProcessAsync(root, file, known, opts, ct);
                     outcome.Add(result);
                 }
                 catch (OperationCanceledException)
@@ -268,7 +268,16 @@ public sealed class Scanner(
                                outcome.Unchanged, gone, outcome.Errors, cancelled);
     }
 
-    private async Task<Reconciled> ProcessAsync(
+    /// <summary>
+    /// Index one file of a root now, exactly as a scan would: hash, headers,
+    /// content, location. What the import does with a file that is already
+    /// inside a root, and with one it has just copied into the Tessera folder.
+    /// </summary>
+    /// <returns>The content and what recording it was: new, a copy of known bytes, a move, or nothing new.</returns>
+    public Task<(long ContentId, Reconciled Outcome)> IndexFileAsync(ScanRoot root, string absPath, CancellationToken ct) =>
+        ProcessAsync(root, PathRules.Canonical(absPath), [], options.Value, ct);
+
+    private async Task<(long ContentId, Reconciled Outcome)> ProcessAsync(
         ScanRoot root, string absPath,
         Dictionary<string, (long ContentId, long Size, DateTimeOffset? Mtime)> known,
         ScannerOptions opts, CancellationToken ct)
@@ -287,7 +296,7 @@ public sealed class Scanner(
             prev.Mtime is { } m && Math.Abs((m - mtime).TotalSeconds) < 2)
         {
             await content.TouchAsync(root.RootId, rel, DateTimeOffset.UtcNow, ct);
-            return Reconciled.Unchanged;
+            return (prev.ContentId, Reconciled.Unchanged);
         }
 
         // The headers are read inside the hash pass, from the first megabyte
@@ -325,7 +334,7 @@ public sealed class Scanner(
             MetaVersion: metaVersion);
 
         var contentId = await content.UpsertAsync(file, ct);
-        return await content.RecordLocationAsync(contentId, root.AccountId, root.RootId, file, o => StillThere(o, absPath), ct);
+        return (contentId, await content.RecordLocationAsync(contentId, root.AccountId, root.RootId, file, o => StillThere(o, absPath), ct));
     }
 
     /// <summary>
@@ -356,7 +365,12 @@ public sealed class Scanner(
         return info.Exists && info.Length == other.ByteSize;
     }
 
-    private static IEnumerable<string> EnumerateMedia(string root, string[] exclude)
+    /// <param name="nested">
+    /// Roots inside this one (the app's own folder): walked by their own
+    /// root, never by this one, or every picture in them would be indexed
+    /// twice.
+    /// </param>
+    private static IEnumerable<string> EnumerateMedia(string root, string[] exclude, string[] nested)
     {
         var options = new EnumerationOptions
         {
@@ -379,7 +393,13 @@ public sealed class Scanner(
                 continue;
             }
 
-            yield return PathRules.Canonical(path);
+            var canonical = PathRules.Canonical(path);
+            if (nested.Length > 0 && nested.Any(n => PathRules.RelativeTo(n, canonical) is not null))
+            {
+                continue;
+            }
+
+            yield return canonical;
         }
     }
 

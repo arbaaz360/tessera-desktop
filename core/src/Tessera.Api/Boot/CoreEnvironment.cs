@@ -30,6 +30,13 @@ public sealed record CoreEnvironment(string Token, string DataDir, string WebOri
     public string LogsDir => Path.Combine(DataDir, "logs");
     public string PidFile => Path.Combine(DataDir, "core.pid");
 
+    /// <summary>
+    /// <c>TESSERA_FOLDER</c>: where the Tessera folder goes when nobody has
+    /// chosen, instead of Pictures/Tessera. Tests and dev runs set it so
+    /// nothing is copied into a real Pictures folder.
+    /// </summary>
+    public string? FolderOverride { get; init; }
+
     /// <summary>The origins CORS allows: the shell's, plus Vite's in dev.</summary>
     public string[] AllowedOrigins => Dev ? [WebOrigin, DevOrigin] : [WebOrigin];
 
@@ -67,7 +74,16 @@ public sealed record CoreEnvironment(string Token, string DataDir, string WebOri
 
         var dev = Environment.GetEnvironmentVariable("TESSERA_DEV") == "1";
 
-        return new CoreEnvironment(token, Path.GetFullPath(dataDir), origin.TrimEnd('/'), port, dev);
+        var folder = Environment.GetEnvironmentVariable("TESSERA_FOLDER");
+        if (!string.IsNullOrWhiteSpace(folder) && !Path.IsPathFullyQualified(folder.Trim()))
+        {
+            throw new BootException(ExitBadEnvironment, $"TESSERA_FOLDER must be an absolute path; got '{folder}'.");
+        }
+
+        return new CoreEnvironment(token, Path.GetFullPath(dataDir), origin.TrimEnd('/'), port, dev)
+        {
+            FolderOverride = string.IsNullOrWhiteSpace(folder) ? null : folder.Trim(),
+        };
     }
 
     /// <summary>Make every directory of §7 exist.</summary>

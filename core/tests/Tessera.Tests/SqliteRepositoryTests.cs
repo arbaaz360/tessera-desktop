@@ -288,10 +288,15 @@ public sealed class SqliteRepositoryTests
         var album = await lib.Albums.EnsureAsync(TempLibrary.Account, "keep", "", None);
         await lib.Albums.AddAsync(TempLibrary.Account, album, [id], None);
 
-        Assert.True(await lib.Library.RemoveRootAsync(TempLibrary.Account, root, None));
+        Assert.Equal(0, await lib.Library.RemoveRootAsync(TempLibrary.Account, root, None));
+        Assert.Null(await lib.Library.RemoveRootAsync(TempLibrary.Account, root, None));
         Assert.Equal(0, await lib.Timeline.CountAsync(TempLibrary.Account, None));
         Assert.Empty(await lib.Library.RootsAsync(TempLibrary.Account, None));
-        Assert.Equal(1, (await lib.Albums.GetAsync(TempLibrary.Account, album, None))!.ItemCount);
+
+        // A person's album keeps the membership (the folder may come back),
+        // but counts only what is live: nothing, now.
+        Assert.Equal(0, (await lib.Albums.GetAsync(TempLibrary.Account, album, None))!.ItemCount);
+        Assert.Single(await lib.Albums.MemberHashesAsync(album, None));
         // Still viewable through the album, with no path to a file.
         var view = await lib.Viewable.GetAsync(TempLibrary.Account, id, None);
         Assert.NotNull(view);
